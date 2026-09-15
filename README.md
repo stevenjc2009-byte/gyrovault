@@ -13,6 +13,16 @@ A PS Vita homebrew tilt maze. Tilt the console to roll a steel ball through the 
 2. Copy it to your Vita and install it with VitaShell.
 3. For the built-in updater to install updates, enable **Unsafe Homebrew** in HENkaku Settings.
 
+### Install straight from the Vita (QR code)
+
+Scan this with VitaShell's QR reader. A scanned URL ending in `.vpk` is downloaded and offered for install, so the Vita never needs a PC or a USB cable.
+
+![QR code linking to the newest gyrovault.vpk release](docs/install-qr.png)
+
+It encodes `https://github.com/stevenjc2009-byte/gyrovault/releases/latest/download/gyrovault.vpk`, which always resolves to the newest release, so this code stays correct after every update.
+
+If VitaShell fails on it — it has [known](https://github.com/TheOfficialFloW/VitaShell/issues/280) [trouble](https://github.com/TheOfficialFloW/VitaShell/issues/414) with GitHub release links — scan it with [Vita VPK Installer Direct](https://github.com/theheroGAC/Vita-VPKInstaller-Direct) instead, which handles the redirect with libcurl. On firmware without TLS 1.2, downloads from GitHub need iTLS-Enso.
+
 ## Controls
 
 | Where | Input |
