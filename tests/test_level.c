@@ -82,11 +82,11 @@ int main(void)
     /* Dims: the 24x13 board is 960x520 px. */
     CHECK(LEVEL_W * CELL_PX == 960 && LEVEL_H * CELL_PX == 520);
 
-    /* 20 vaults, all different: every pair has its own name, and inside the border more than
+    /* 60 vaults, all different: every pair has its own name, and inside the border more than
      * half of the cells that hold a wall, pit or goal in either vault differ between them.
      * (Shared open floor is ignored: two open maps match on floor without being alike.)
      * The easy-to-hard ramp is proven with real physics in test_solvable. */
-    CHECK(LEVEL_COUNT == 20);
+    CHECK(LEVEL_COUNT == 60);
     {
         int j, used, least_pct = 100;
         for (i = 0; i < LEVEL_COUNT; i++)

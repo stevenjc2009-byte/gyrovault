@@ -6,7 +6,7 @@
 #define LEVEL_H      13
 #define CELL_PX      40
 #define BOARD_TOP_PX 24
-#define LEVEL_COUNT 20
+#define LEVEL_COUNT 60
 
 typedef enum {
     CELL_FLOOR = 0,
