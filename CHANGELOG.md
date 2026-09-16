@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.1] - 2026-09-16
+
+### Fixed
+- The update error now says what OpenSSL made of the certificate bundle, and says it first. *Check for Updates* still failed on a real Vita after 2.0.0, but the message changed from "error adding trust anchors from locations" to "from certificate **blob**". That wording proves the 2.0.0 change does what it was meant to — the game reads the bundle itself and hands it to curl in memory — and that opening `app0:` was never the cause. The failure is further on, where OpenSSL loads the certificates into its trust store, and curl collapses every possible cause there into a single number. The error now begins with how many certificates parsed, how many were accepted, and the OpenSSL error behind the first rejection.
+- Notes on the end of an error message were never visible. Errors are drawn as three wrapped lines with the remainder dropped and no ellipsis, so the CA note 2.0.0 appended *after* a long TLS message ran off the bottom of the box. Any such note now leads the message.
+
+### Known issues
+- **The built-in updater still fails on hardware.** This release does not fix it — it makes the cause visible so the next one can. Install this VPK by hand: scan the QR code in the README with VitaShell, or copy the VPK across and install it.
+
 ## [2.0.0] - 2026-09-16
 
 ### Added
