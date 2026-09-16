@@ -42,12 +42,12 @@ int main(void)
 
 #if LEVEL_COUNT == 20
     /* Defaults blob (v4) must match an independent CRC32 (python zlib.crc32 of the
-     * 96-byte header+mask+20xSAVE_NO_TIME prefix = 0xb2a13bf9). Only meaningful at
+     * 96-byte header+mask+20xSAVE_NO_TIME prefix = 0x0c524c5d). Only meaningful at
      * the LEVEL_COUNT this literal was computed for; the generic checks below cover
      * correctness at any LEVEL_COUNT. */
     {
         static const uint8_t expect[SAVE_BLOB_SIZE] = {
-            'G', 'Y', 'R', 'V', 4, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            'G', 'Y', 'R', 'V', 4, 0, 1, 20, 0, 0, 0, 0, 0, 0, 0, 0, /* byte 7 = level count */
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -55,7 +55,7 @@ int main(void)
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xf9, 0x3b, 0xa1, 0xb2};
+            0x5d, 0x4c, 0x52, 0x0c};
         save_defaults(&s);
         CHECK(is_defaults(&s));
         CHECK(save_serialize(&s, buf, sizeof(buf)) == SAVE_BLOB_SIZE);
@@ -196,7 +196,9 @@ int main(void)
         for (i = 0; i < (size_t)LEVEL_COUNT; i++)
             r.best_cs[i] = 0;
         CHECK(save_deserialize(&r, v2_blob, SAVE_BLOB_SIZE_V2) == 0);
-        CHECK(r.unlocked == 2 && r.completed_mask == 3);
+        /* unlocked comes back as 3, not the stored 2: the mask says vault 2 was
+         * finished, and finishing vault i earns vault i+2. */
+        CHECK(r.unlocked == 3 && r.completed_mask == 3);
         {
             int ok = 1;
             for (i = 0; i < (size_t)LEVEL_COUNT; i++)
@@ -289,6 +291,82 @@ int main(void)
         r.unlocked = 9;
         CHECK(save_deserialize(&r, v3_fixture, SAVE_BLOB_SIZE) == -1);
         CHECK(is_defaults(&r));
+    }
+
+    /* A v4 save written by a 20-level build, read by this one. This is the case that
+     * silently wiped every save while the expected length was derived from today's
+     * LEVEL_COUNT: at LEVEL_COUNT 60 a 100-byte v4 blob failed the length check, so
+     * save_load returned -1, the game started on defaults, and the next save_write
+     * overwrote the real progress. Byte 7 now carries the writer's level count (20),
+     * so the blob is measured against itself.
+     *
+     * The fixture has every one of the 20 vaults finished, which is also what proves
+     * unlocked is re-derived: the 20-level build clamped unlocked to 20, and nothing in
+     * the game can raise it, so vault 21 would stay locked forever. Built with python
+     * zlib.crc32 over bytes 0..95. */
+    {
+        static const uint8_t v4_20[100] = {
+            0x47, 0x59, 0x52, 0x56, 0x04, 0x00, 0x14, 0x14, 0xFF, 0xFF, 0x0F, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0xE8, 0x03, 0x00, 0x00, 0xEF, 0x03, 0x00, 0x00,
+            0xF6, 0x03, 0x00, 0x00, 0xFD, 0x03, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00,
+            0x0B, 0x04, 0x00, 0x00, 0x12, 0x04, 0x00, 0x00, 0x19, 0x04, 0x00, 0x00,
+            0x20, 0x04, 0x00, 0x00, 0x27, 0x04, 0x00, 0x00, 0x2E, 0x04, 0x00, 0x00,
+            0x35, 0x04, 0x00, 0x00, 0x3C, 0x04, 0x00, 0x00, 0x43, 0x04, 0x00, 0x00,
+            0x4A, 0x04, 0x00, 0x00, 0x51, 0x04, 0x00, 0x00, 0x58, 0x04, 0x00, 0x00,
+            0x5F, 0x04, 0x00, 0x00, 0x66, 0x04, 0x00, 0x00, 0x6D, 0x04, 0x00, 0x00,
+            0x32, 0xDC, 0x82, 0xCF};
+        uint8_t bad[100];
+        int ok;
+
+        CHECK(save_deserialize(&r, v4_20, sizeof v4_20) == 0);
+        CHECK(r.completed_mask == (uint64_t)0xFFFFFu);
+        /* Finishing vault 20 earns vault 21, wherever LEVEL_COUNT now ends. */
+        CHECK(r.unlocked == (LEVEL_COUNT >= 21 ? 21 : LEVEL_COUNT));
+        ok = 1;
+        for (i = 0; i < 20; i++)
+            if (r.best_cs[i] != (uint32_t)(1000 + i * 7))
+                ok = 0;
+        CHECK(ok); /* all 20 best times survived the level-count change */
+        ok = 1;
+        for (i = 20; i < (size_t)LEVEL_COUNT; i++)
+            if (r.best_cs[i] != SAVE_NO_TIME)
+                ok = 0;
+        CHECK(ok); /* vaults this player has never seen come back with no time */
+
+        /* Byte 7 is load-bearing now, so a wrong one must be refused, not guessed at. */
+        memcpy(bad, v4_20, sizeof bad);
+        bad[7] = 0; /* what the unreleased first draft of v4 wrote there */
+        CHECK(save_deserialize(&r, bad, sizeof bad) == -1);
+        CHECK(is_defaults(&r));
+        memcpy(bad, v4_20, sizeof bad);
+        bad[7] = 21; /* claims one more level than the blob is long */
+        CHECK(save_deserialize(&r, bad, sizeof bad) == -1);
+        CHECK(is_defaults(&r));
+        memcpy(bad, v4_20, sizeof bad);
+        bad[6] = 21; /* unlocked past the end of the blob's own level list */
+        CHECK(save_deserialize(&r, bad, sizeof bad) == -1);
+        CHECK(is_defaults(&r));
+        CHECK(save_deserialize(&r, v4_20, sizeof v4_20 - 1) == -1); /* truncated */
+        CHECK(is_defaults(&r));
+    }
+
+    /* A v3 save with every vault of the 20-level game finished -- what a 2.0.2 player
+     * who cleared the lot actually has on their memory card. Same unlock problem, same
+     * fix. CRC32 over bytes 0..91. */
+    {
+        static const uint8_t v3_done[SAVE_BLOB_SIZE_V3] = {
+            0x47, 0x59, 0x52, 0x56, 0x03, 0x00, 0x14, 0x00, 0xFF, 0xFF, 0x0F, 0x00,
+            0xE8, 0x03, 0x00, 0x00, 0xEF, 0x03, 0x00, 0x00, 0xF6, 0x03, 0x00, 0x00,
+            0xFD, 0x03, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x0B, 0x04, 0x00, 0x00,
+            0x12, 0x04, 0x00, 0x00, 0x19, 0x04, 0x00, 0x00, 0x20, 0x04, 0x00, 0x00,
+            0x27, 0x04, 0x00, 0x00, 0x2E, 0x04, 0x00, 0x00, 0x35, 0x04, 0x00, 0x00,
+            0x3C, 0x04, 0x00, 0x00, 0x43, 0x04, 0x00, 0x00, 0x4A, 0x04, 0x00, 0x00,
+            0x51, 0x04, 0x00, 0x00, 0x58, 0x04, 0x00, 0x00, 0x5F, 0x04, 0x00, 0x00,
+            0x66, 0x04, 0x00, 0x00, 0x6D, 0x04, 0x00, 0x00, 0x93, 0xD3, 0x08, 0xF9};
+
+        CHECK(save_deserialize(&r, v3_done, SAVE_BLOB_SIZE_V3) == 0);
+        CHECK(r.unlocked == (LEVEL_COUNT >= 21 ? 21 : LEVEL_COUNT));
+        CHECK(save_level_open(&r, 20) == (LEVEL_COUNT >= 21)); /* vault 21 is playable */
     }
 
     /* save_record_time */
@@ -386,7 +464,9 @@ int main(void)
             CHECK(save_record_time(&s, 1, 555) == 1);
             CHECK(save_write(&s, dir, path) == 0);
             CHECK(save_load(&r, path) == 0);
-            CHECK(r.unlocked == 2 && r.completed_mask == 3);
+            /* The mask was set by hand here without save_mark_complete, so the stored
+             * unlocked (2) trails it; the load re-derives 3 from the completed bits. */
+            CHECK(r.unlocked == 3 && r.completed_mask == 3);
             CHECK(r.best_cs[0] == 1234 && r.best_cs[1] == 555);
             f = fopen(tmpf, "rb");
             CHECK(f == NULL); /* temp file renamed away */

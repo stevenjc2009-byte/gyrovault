@@ -8,11 +8,17 @@
 #define SAVE_DIR  "ux0:data/gyrovault"
 #define SAVE_PATH "ux0:data/gyrovault/save.dat"
 
-/* Fixed-size v4 blob, derived (not a literal) so it grows automatically as
- * LEVEL_COUNT grows from 20 to 60: a 16-byte header (magic, version,
- * unlocked, reserved, 64-bit mask) + one uint32 best time per level + a
- * trailing 4-byte CRC32. At LEVEL_COUNT 20 this is 100 bytes; at 60, 260. */
-#define SAVE_BLOB_SIZE (16 + LEVEL_COUNT * 4 + 4)
+/* Size of a v4 blob holding `n` best times: a 16-byte header (magic, version,
+ * unlocked, level count, 64-bit mask) + one uint32 best time per level + a
+ * trailing 4-byte CRC32. At 20 levels this is 100 bytes; at 60, 260. */
+#define SAVE_BLOB_SIZE_FOR(n) (16 + (n) * 4 + 4)
+
+/* What this build writes. Derived from LEVEL_COUNT rather than a literal, so it
+ * grows with the level list -- but a blob on disk is NEVER measured against it,
+ * only against the count stamped in the blob's own header (byte 7). Deriving the
+ * expected length from today's LEVEL_COUNT is what would wipe every save the
+ * moment a release adds levels. */
+#define SAVE_BLOB_SIZE SAVE_BLOB_SIZE_FOR(LEVEL_COUNT)
 
 /* Size of the v1 and v2 blobs (both 16 bytes); kept as a named constant since
  * save_deserialize still has to recognize and migrate them. */
@@ -64,19 +70,28 @@ int save_record_time(SaveData *s, int index, uint32_t cs);
  * at its new slot without opening the levels before it. */
 int save_level_open(const SaveData *s, int index);
 
-/* Fixed-size blob (format v4), always written by save_serialize:
+/* Blob (format v4), always written by save_serialize:
  *   [0..3]   "GYRV" magic
  *   [4..5]   format version, little-endian = 4
  *   [6]      unlocked
- *   [7]      reserved, must be 0
+ *   [7]      level count: how many best-time slots follow, 1..64
  *   [8..15]  completed_mask, uint64 little-endian
- *   [16..]   best_cs[LEVEL_COUNT], uint32 little-endian each
+ *   [16..]   best_cs[level count], uint32 little-endian each
  *   [last 4] CRC32 (crc32_ieee) over every byte before it, little-endian
- * SAVE_BLOB_SIZE is derived from LEVEL_COUNT (16 + LEVEL_COUNT*4 + 4), so the
- * blob grows as LEVEL_COUNT grows; the CRC always lives at the last 4 bytes,
- * i.e. offset SAVE_BLOB_SIZE - 4.
+ * The blob is self-describing: byte 7 says how long it is, so a save written by
+ * a build with a different LEVEL_COUNT is migrated rather than rejected. Byte 7
+ * was a must-be-zero reserved field in the unreleased first draft of v4; the
+ * version was not bumped because no v4 save has ever left this machine (2.0.2
+ * and everything before it wrote v3), so zero there now simply reads as a
+ * malformed length and is rejected.
  * serialize returns bytes written (SAVE_BLOB_SIZE) or 0 if cap too small.
  * deserialize returns 0 on success; on any corruption returns -1 and sets defaults.
+ *
+ * Across a level-count change: best times carry over for the levels both builds
+ * have, mask bits for levels this build does not have are dropped, and the
+ * unlocked counter is re-derived from the mask -- save_mark_complete clamps it to
+ * the LEVEL_COUNT of the build that wrote it, so a player who had finished every
+ * vault would otherwise find the new ones locked with no way in.
  *
  * Migration: deserialize also accepts three older, permanently fixed-size
  * formats and upgrades them into the current SaveData in memory (the file on
@@ -101,11 +116,12 @@ int save_level_open(const SaveData *s, int index);
  *     Migrated: v1 mask bit0 -> new bit0, v1 mask bit1 -> new bit SAVE_V1_LEVEL2_INDEX.
  *
  * A blob is rejected (-1, defaults set) for: bad magic, bad CRC, a length that
- * doesn't match the size required by its own stamped version (SAVE_BLOB_SIZE
- * for v4, SAVE_BLOB_SIZE_V3 for v3, SAVE_BLOB_SIZE_V2 for v1/v2), an unknown
- * version, unlocked outside 1..LEVEL_COUNT (1..2 for v1), reserved byte != 0,
- * or completed_mask bits at or above LEVEL_COUNT set (v1 mask bits above
- * bit1 set). */
+ * doesn't match the size required by its own stamped version (for v4, the size
+ * its own byte 7 asks for; SAVE_BLOB_SIZE_V3 for v3, SAVE_BLOB_SIZE_V2 for
+ * v1/v2), an unknown version, a v4 level count outside 1..64, unlocked outside
+ * 1..the blob's own level count (1..LEVEL_COUNT for v2/v3, 1..2 for v1), a
+ * nonzero reserved byte for v2/v3, or completed_mask bits at or above the
+ * blob's own level count (LEVEL_COUNT for v2/v3, bit1 for v1). */
 size_t save_serialize(const SaveData *s, uint8_t *buf, size_t cap);
 int    save_deserialize(SaveData *s, const uint8_t *buf, size_t len);
 

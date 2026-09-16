@@ -74,6 +74,35 @@ static uint64_t save_valid_mask(void)
     return (LEVEL_COUNT >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << LEVEL_COUNT) - 1);
 }
 
+/* Mask of the bits a blob that stamped `levels` levels is allowed to have set. */
+static uint64_t save_mask_for(int levels)
+{
+    return (levels >= 64) ? ~(uint64_t)0 : (((uint64_t)1 << levels) - 1);
+}
+
+/* Re-derive the unlocked counter from the completed mask. save_mark_complete clamps
+ * unlocked to the LEVEL_COUNT of the build that wrote the save, so a player who had
+ * finished the last vault of an older, shorter game comes back with unlocked sitting
+ * on that old count -- and every vault added since would be locked with nothing in the
+ * game able to open it. Finishing vault i always earns i+2, so take the highest bit
+ * that is set and apply the same rule against today's LEVEL_COUNT. Never lowers
+ * unlocked, so a save from this same build is unchanged.
+ *
+ * Deliberately not applied to v1: its migration moves the old level 2 to a slot far up
+ * the list on purpose and documents that it must not open everything below it. */
+static void save_unlock_from_mask(SaveData *s)
+{
+    int i;
+    for (i = LEVEL_COUNT - 1; i >= 0; i--) {
+        if ((s->completed_mask >> i) & (uint64_t)1) {
+            int unlock = (i + 2 > LEVEL_COUNT) ? LEVEL_COUNT : i + 2;
+            if (s->unlocked < unlock)
+                s->unlocked = (uint8_t)unlock;
+            return;
+        }
+    }
+}
+
 size_t save_serialize(const SaveData *s, uint8_t *buf, size_t cap)
 {
     uint32_t crc;
@@ -85,7 +114,7 @@ size_t save_serialize(const SaveData *s, uint8_t *buf, size_t cap)
     buf[4] = (uint8_t)(SAVE_FORMAT_VERSION & 0xFF);
     buf[5] = (uint8_t)((SAVE_FORMAT_VERSION >> 8) & 0xFF);
     buf[6] = s->unlocked;
-    buf[7] = 0; /* reserved */
+    buf[7] = (uint8_t)LEVEL_COUNT; /* how many best-time slots follow */
     buf[8]  = (uint8_t)(s->completed_mask & 0xFF);
     buf[9]  = (uint8_t)((s->completed_mask >> 8) & 0xFF);
     buf[10] = (uint8_t)((s->completed_mask >> 16) & 0xFF);
@@ -127,33 +156,42 @@ int save_deserialize(SaveData *s, const uint8_t *buf, size_t len)
     if (version == SAVE_FORMAT_VERSION) {
         uint8_t unlocked;
         uint64_t mask;
-        int i;
+        int i, levels, shared;
+        size_t blob;
 
-        if (len != SAVE_BLOB_SIZE)
+        /* The blob's own byte 7 says how long it is, not today's LEVEL_COUNT: a save
+         * written by a build with fewer levels has to migrate, not be thrown away. */
+        levels = buf[7];
+        if (levels < 1 || levels > 64)
             return -1;
-        stored = (uint32_t)buf[SAVE_BLOB_SIZE - 4] | ((uint32_t)buf[SAVE_BLOB_SIZE - 3] << 8) |
-                 ((uint32_t)buf[SAVE_BLOB_SIZE - 2] << 16) | ((uint32_t)buf[SAVE_BLOB_SIZE - 1] << 24);
-        crc = crc32_ieee(buf, SAVE_BLOB_SIZE - 4);
+        blob = (size_t)SAVE_BLOB_SIZE_FOR(levels);
+        if (len != blob)
+            return -1;
+        stored = (uint32_t)buf[blob - 4] | ((uint32_t)buf[blob - 3] << 8) |
+                 ((uint32_t)buf[blob - 2] << 16) | ((uint32_t)buf[blob - 1] << 24);
+        crc = crc32_ieee(buf, blob - 4);
         if (crc != stored)
             return -1;
-        if (buf[7] != 0) /* reserved must be zero */
-            return -1;
         unlocked = buf[6];
-        if (unlocked < 1 || unlocked > LEVEL_COUNT)
+        if (unlocked < 1 || unlocked > levels)
             return -1;
         mask = (uint64_t)buf[8] | ((uint64_t)buf[9] << 8) |
                ((uint64_t)buf[10] << 16) | ((uint64_t)buf[11] << 24) |
                ((uint64_t)buf[12] << 32) | ((uint64_t)buf[13] << 40) |
                ((uint64_t)buf[14] << 48) | ((uint64_t)buf[15] << 56);
-        if (mask & ~save_valid_mask())
+        if (mask & ~save_mask_for(levels))
             return -1;
-        s->unlocked = unlocked;
-        s->completed_mask = mask;
-        for (i = 0; i < LEVEL_COUNT; i++) {
+        /* Fold onto this build: a longer save loses the bits and times for levels this
+         * build does not have; a shorter one leaves the rest at SAVE_NO_TIME. */
+        s->unlocked = (uint8_t)(unlocked > LEVEL_COUNT ? LEVEL_COUNT : unlocked);
+        s->completed_mask = mask & save_valid_mask();
+        shared = (levels < LEVEL_COUNT) ? levels : LEVEL_COUNT;
+        for (i = 0; i < shared; i++) {
             size_t off = 16 + (size_t)i * 4;
             s->best_cs[i] = (uint32_t)buf[off] | ((uint32_t)buf[off + 1] << 8) |
                              ((uint32_t)buf[off + 2] << 16) | ((uint32_t)buf[off + 3] << 24);
         }
+        save_unlock_from_mask(s);
         return 0;
     }
 
@@ -190,6 +228,7 @@ int save_deserialize(SaveData *s, const uint8_t *buf, size_t len)
             s->best_cs[i] = (uint32_t)buf[off] | ((uint32_t)buf[off + 1] << 8) |
                              ((uint32_t)buf[off + 2] << 16) | ((uint32_t)buf[off + 3] << 24);
         }
+        save_unlock_from_mask(s);
         return 0;
     }
 
@@ -216,6 +255,7 @@ int save_deserialize(SaveData *s, const uint8_t *buf, size_t len)
         s->unlocked = unlocked;
         s->completed_mask = (uint64_t)mask;
         /* best_cs already SAVE_NO_TIME from save_defaults above */
+        save_unlock_from_mask(s);
         return 0;
     }
 
@@ -317,11 +357,16 @@ int save_write(const SaveData *s, const char *dir, const char *path)
         remove(tmp);
         return -1;
     }
-    /* The Vita's rename fails if the destination exists. */
-    remove(path);
+    /* Try the atomic replace first. Only if that fails -- the Vita's rename refuses an
+     * existing destination -- fall back to clearing the way and retrying. Removing first
+     * unconditionally, as this used to, opened a window where a crash or a pulled battery
+     * left no save at all: the old file already deleted, the new one still called .tmp. */
     if (rename(tmp, path) != 0) {
-        remove(tmp);
-        return -1;
+        remove(path);
+        if (rename(tmp, path) != 0) {
+            remove(tmp);
+            return -1;
+        }
     }
     return 0;
 }
