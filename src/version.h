@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#define GV_VERSION     "2.0.1"
+#define GV_VERSION     "2.0.2"
 #define GV_TITLE_ID    "GYRV00001"
 #define GV_APP_NAME    "Gyrovault"
 #define GV_REPO_OWNER  "stevenjc2009-byte"
