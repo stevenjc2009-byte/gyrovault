@@ -19,9 +19,9 @@ A PS Vita homebrew tilt maze. Tilt the console to roll a steel ball through the 
 
 Scan this with VitaShell's QR reader. A scanned URL ending in `.vpk` is downloaded and offered for install, so the Vita never needs a PC or a USB cable.
 
-![QR code linking to the gyrovault 2.0.0 VPK](docs/install-qr.png)
+![QR code linking to the gyrovault 2.0.1 VPK](docs/install-qr.png)
 
-It encodes `https://github.com/stevenjc2009-byte/gyrovault/releases/download/v2.0.0/gyrovault.vpk`, so it installs **2.0.0** and nothing else. The code is pinned to its own version: this page's code always gives you 2.0.0, and each future release carries its own code for that release.
+It encodes `https://github.com/stevenjc2009-byte/gyrovault/releases/download/v2.0.1/gyrovault.vpk`, so it installs **2.0.1** and nothing else. The code is pinned to its own version: this page's code always gives you 2.0.1, and each future release carries its own code for that release.
 
 If VitaShell fails on it — it has [known](https://github.com/TheOfficialFloW/VitaShell/issues/280) [trouble](https://github.com/TheOfficialFloW/VitaShell/issues/414) with GitHub release links — scan it with [Vita VPK Installer Direct](https://github.com/theheroGAC/Vita-VPKInstaller-Direct) instead, which handles the redirect with libcurl. On firmware without TLS 1.2, downloads from GitHub need iTLS-Enso.
 

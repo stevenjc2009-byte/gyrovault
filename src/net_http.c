@@ -10,6 +10,10 @@
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <curl/curl.h>
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
 
 #define NET_POOL_SIZE   (1 * 1024 * 1024)
 #define CA_BUNDLE_PATH  "app0:assets/cacert.pem"
@@ -29,6 +33,13 @@ static char s_net_pool[NET_POOL_SIZE];
 static void  *s_ca_blob;
 static size_t s_ca_len;
 static char   s_ca_note[96];
+
+/* What OpenSSL itself makes of the bundle. curl's blob loader parses the PEM and pushes every
+ * certificate into an X509_STORE; one rejected certificate makes it discard all of them
+ * ("count = 0; break;" in vtls/openssl.c) and report the single CURLcode 77, which cannot tell
+ * "the PEM did not parse" from "the store refused a certificate" from "out of memory".
+ * Replaying those same steps here turns that one number into counts and a real OpenSSL error. */
+static char   s_ca_diag[160];
 
 static void set_err(char *err, size_t cap, const char *fmt_a, long code)
 {
@@ -80,6 +91,76 @@ static void ca_load(void)
     snprintf(s_ca_note, sizeof(s_ca_note), "blob %ld B", n);
 }
 
+/* Reason string if this libcrypto kept them, the raw code otherwise. */
+static const char *err_reason(unsigned long e)
+{
+    const char *r = ERR_reason_error_string(e);
+    return r ? r : "?";
+}
+
+/* Replay curl's load_cacert_from_memory() against our own blob and record the outcome. Purely
+ * observational: it builds a throwaway store and never touches the one curl uses. */
+static void ca_diag(void)
+{
+    s_ca_diag[0] = '\0';
+    if (!s_ca_blob)
+        return;
+
+    BIO *bio = BIO_new_mem_buf(s_ca_blob, (int)s_ca_len);
+    if (!bio) {
+        snprintf(s_ca_diag, sizeof(s_ca_diag), "BIO alloc failed");
+        return;
+    }
+
+    ERR_clear_error();
+    STACK_OF(X509_INFO) *inf = PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL);
+    if (!inf) {
+        unsigned long e = ERR_get_error();
+        snprintf(s_ca_diag, sizeof(s_ca_diag), "%uB PEM unreadable 0x%08lX %s",
+                 (unsigned)s_ca_len, e, err_reason(e));
+        BIO_free(bio);
+        return;
+    }
+
+    X509_STORE *store = X509_STORE_new();
+    if (!store) {
+        unsigned long e = ERR_get_error();
+        snprintf(s_ca_diag, sizeof(s_ca_diag), "%uB store alloc failed 0x%08lX %s",
+                 (unsigned)s_ca_len, e, err_reason(e));
+        sk_X509_INFO_pop_free(inf, X509_INFO_free);
+        BIO_free(bio);
+        return;
+    }
+
+    int           entries = sk_X509_INFO_num(inf);
+    int           certs = 0, added = 0, first_bad = -1;
+    unsigned long first_err = 0;
+    for (int i = 0; i < entries; i++) {
+        X509_INFO *it = sk_X509_INFO_value(inf, i);
+        if (!it || !it->x509)
+            continue;
+        certs++;
+        ERR_clear_error();
+        if (X509_STORE_add_cert(store, it->x509)) {
+            added++;
+        } else if (first_bad < 0) {
+            first_bad = i;
+            first_err = ERR_get_error();
+        }
+    }
+
+    if (certs > 0 && added == certs)
+        snprintf(s_ca_diag, sizeof(s_ca_diag), "%uB ok %d/%d", (unsigned)s_ca_len, added, certs);
+    else
+        snprintf(s_ca_diag, sizeof(s_ca_diag), "%uB %d/%d of %d bad#%d 0x%08lX %s",
+                 (unsigned)s_ca_len, added, certs, entries, first_bad, first_err,
+                 err_reason(first_err));
+
+    X509_STORE_free(store);
+    sk_X509_INFO_pop_free(inf, X509_INFO_free);
+    BIO_free(bio);
+}
+
 int net_http_init(char *err, size_t err_cap)
 {
     if (s_ready)
@@ -123,8 +204,10 @@ int net_http_init(char *err, size_t err_cap)
         s_curl_inited = 1;
     }
 
-    if (!s_ca_blob)
+    if (!s_ca_blob) {
         ca_load();
+        ca_diag();
+    }
 
     s_ready = 1;
     return 0;
@@ -181,17 +264,14 @@ static void curl_fail_text(char *err, size_t cap, CURLcode cc, const char *errbu
 {
     if (!err || !cap)
         return;
+    /* The CA note leads. Errors are drawn as three wrapped lines and anything past them is
+     * dropped without an ellipsis (draw_wrapped in game.c), so a note appended after a long TLS
+     * message is never seen on screen - which is exactly what happened to the 2.0.0 one. */
+    const char *note = s_ca_diag[0] ? s_ca_diag : (s_ca_note[0] ? s_ca_note : "none");
     if (errbuf && errbuf[0])
-        snprintf(err, cap, "%s: %s", curl_easy_strerror(cc), errbuf);
+        snprintf(err, cap, "[CA %s] %s: %s", note, curl_easy_strerror(cc), errbuf);
     else
-        snprintf(err, cap, "%s (curl %d)", curl_easy_strerror(cc), (int)cc);
-
-    /* Say which CA path was in use, so a failure on hardware identifies itself. */
-    if (s_ca_note[0]) {
-        size_t n = strlen(err);
-        if (n + 10 < cap)
-            snprintf(err + n, cap - n, " [CA %s]", s_ca_note);
-    }
+        snprintf(err, cap, "[CA %s] %s (curl %d)", note, curl_easy_strerror(cc), (int)cc);
 }
 
 int net_http_get_redirect(const char *url, long *status, char *location, size_t loc_cap,
