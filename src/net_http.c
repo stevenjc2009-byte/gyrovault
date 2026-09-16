@@ -1,7 +1,9 @@
 #include "net_http.h"
 #include "version.h"
 
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <psp2/sysmodule.h>
@@ -19,10 +21,63 @@ static int  s_netctl_inited;
 static int  s_curl_inited;
 static char s_net_pool[NET_POOL_SIZE];
 
+/* The CA bundle is read into memory here and handed to curl as a blob instead of letting
+ * OpenSSL open app0: itself. On real hardware curl reported "error adding trust anchors
+ * from locations: CAfile: app0:assets/cacert.pem CApath: none" while the same build worked
+ * in Vita3K, and that message comes from OpenSSL's own file load. Reading it ourselves also
+ * means a failure names the step that failed instead of one opaque TLS message. */
+static void  *s_ca_blob;
+static size_t s_ca_len;
+static char   s_ca_note[96];
+
 static void set_err(char *err, size_t cap, const char *fmt_a, long code)
 {
     if (err && cap)
         snprintf(err, cap, fmt_a, code);
+}
+
+/* Read the CA bundle once. Never fatal: apply_common() falls back to letting curl open the
+ * file, which is exactly what 1.0.0 did, so this can only add a working path, not remove one.
+ * s_ca_note records which path is in use and is appended to any transfer error. */
+static void ca_load(void)
+{
+    s_ca_note[0] = '\0';
+
+    FILE *f = fopen(CA_BUNDLE_PATH, "rb");
+    if (!f) {
+        snprintf(s_ca_note, sizeof(s_ca_note), "file fallback, open failed errno %d", errno);
+        return;
+    }
+
+    long n = -1;
+    if (fseek(f, 0, SEEK_END) == 0)
+        n = ftell(f);
+    if (n <= 0) {
+        fclose(f);
+        snprintf(s_ca_note, sizeof(s_ca_note), "file fallback, bad size %ld", n);
+        return;
+    }
+    rewind(f);
+
+    void *buf = malloc((size_t)n);
+    if (!buf) {
+        fclose(f);
+        snprintf(s_ca_note, sizeof(s_ca_note), "file fallback, no memory for %ld B", n);
+        return;
+    }
+
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    if (got != (size_t)n) {
+        free(buf);
+        snprintf(s_ca_note, sizeof(s_ca_note), "file fallback, read %u of %ld B", (unsigned)got,
+                 n);
+        return;
+    }
+
+    s_ca_blob = buf;
+    s_ca_len  = got;
+    snprintf(s_ca_note, sizeof(s_ca_note), "blob %ld B", n);
 }
 
 int net_http_init(char *err, size_t err_cap)
@@ -68,6 +123,9 @@ int net_http_init(char *err, size_t err_cap)
         s_curl_inited = 1;
     }
 
+    if (!s_ca_blob)
+        ca_load();
+
     s_ready = 1;
     return 0;
 }
@@ -86,6 +144,11 @@ void net_http_shutdown(void)
         sceNetTerm();
         s_net_inited = 0;
     }
+    if (s_ca_blob) {
+        free(s_ca_blob);
+        s_ca_blob = NULL;
+        s_ca_len = 0;
+    }
     s_ready = 0;
 }
 
@@ -95,7 +158,15 @@ static void apply_common(CURL *c, const char *url, char *errbuf)
     errbuf[0] = '\0';
     curl_easy_setopt(c, CURLOPT_URL, url);
     curl_easy_setopt(c, CURLOPT_ERRORBUFFER, errbuf);
-    curl_easy_setopt(c, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+    if (s_ca_blob) {
+        struct curl_blob ca;
+        ca.data  = s_ca_blob;
+        ca.len   = s_ca_len;
+        ca.flags = CURL_BLOB_NOCOPY; /* s_ca_blob outlives every transfer */
+        curl_easy_setopt(c, CURLOPT_CAINFO_BLOB, &ca);
+    } else {
+        curl_easy_setopt(c, CURLOPT_CAINFO, CA_BUNDLE_PATH);
+    }
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 2L);
     curl_easy_setopt(c, CURLOPT_USERAGENT, USER_AGENT);
@@ -114,6 +185,13 @@ static void curl_fail_text(char *err, size_t cap, CURLcode cc, const char *errbu
         snprintf(err, cap, "%s: %s", curl_easy_strerror(cc), errbuf);
     else
         snprintf(err, cap, "%s (curl %d)", curl_easy_strerror(cc), (int)cc);
+
+    /* Say which CA path was in use, so a failure on hardware identifies itself. */
+    if (s_ca_note[0]) {
+        size_t n = strlen(err);
+        if (n + 10 < cap)
+            snprintf(err + n, cap - n, " [CA %s]", s_ca_note);
+    }
 }
 
 int net_http_get_redirect(const char *url, long *status, char *location, size_t loc_cap,

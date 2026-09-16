@@ -19,6 +19,7 @@
 - The VPK version is derived from `GV_VERSION` in `src/version.h` instead of being hardcoded in `CMakeLists.txt`.
 
 ### Fixed
+- *Check for Updates* failed on a real Vita with "Problem with the SSL CA cert (path? access rights?) ... error adding trust anchors from locations: CAfile: app0:assets/cacert.pem CApath: none". The CA bundle is now read into memory by the game and handed to curl as a certificate blob, so the TLS layer never opens `app0:` itself. If that read fails, the old file path is still used and the on-screen error says which of the two was in use. Present in 1.0.0; it only shows on hardware, which is why the emulator never caught it.
 - The green cursor border was suppressed on greyed Level Select tiles, so moving the cursor onto a locked or unavailable vault made the selection invisible.
 
 ### Save format
