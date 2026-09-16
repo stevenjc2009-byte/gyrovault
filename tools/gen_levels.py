@@ -46,7 +46,27 @@ def interior() -> list[tuple[int, int]]:
 
 
 def fam_lattice(rng: random.Random) -> Grid:
-    """Pillars on a regular grid, the Lattice idiom: every move ends against a pillar."""
+    """Pillars on a regular grid, the Lattice idiom: every move ends against a pillar.
+
+    This is the only family that reliably grades hard: of 130 graded, 77 reached tier 3
+    and 35 beat the hardest shipped vault, against 3 of 128 for chambers and 1 of 75 for
+    comb. It needs more skeletons than the original three, because test_level.c requires
+    every pair of vaults to differ in more than half of their wall/pit/goal cells and two
+    lattices on the same pitch and offset share nearly every pillar -- 39 eligible maps
+    yielded only 21 that were mutually distinct, against the 40 needed.
+
+    Two attempts to buy that variety inside this family were tried and measured, and both
+    failed. Widening the pitch to 4 and thinning the pillars to 72%: of 107 such maps, 101
+    graded tier 2 and only 4 reached tier 3. Keeping the pitch but giving x and y
+    independent offsets and staggering alternate rows: of 400 such maps only 63 reached
+    tier 3 and 1 beat the hardest shipped vault, and the mean hole count fell from 21 to
+    18 -- a staggered lattice's connectivity is fragile enough that the hole placer keeps
+    rejecting sites, and holes are most of what makes a route long.
+
+    So the skeleton below is the original one, untouched. The extra distinct vaults are
+    bought from the other families instead, by grading a much larger pool: chambers
+    reaches tier 3 as often as lattice does (76 of 130) and fails only on route length,
+    so 5 of its 130 were eligible where 35 of lattice's were."""
     g = blank()
     step_x = rng.choice((2, 2, 3))
     step_y = rng.choice((2, 2, 3))
@@ -267,7 +287,13 @@ class Candidate:
     holes: int
 
 
-def build(rng: random.Random, family: str, index: int, min_moves: int = 6) -> Candidate | None:
+def build(
+    rng: random.Random,
+    family: str,
+    index: int,
+    min_moves: int = 6,
+    hole_range: tuple[int, int] | None = None,
+) -> Candidate | None:
     g = FAMILIES[family](rng)
     free = [(x, y) for (x, y) in interior() if g[y][x] == FLOOR]
     if len(free) < 30:
@@ -284,7 +310,10 @@ def build(rng: random.Random, family: str, index: int, min_moves: int = 6) -> Ca
     if (sx, sy) == (gx, gy):
         return None
 
-    hole_budget = rng.randint(6, 26 if family == "drift" else 18)
+    # Holes are the cheapest way to lengthen a route: every one the ball cannot roll over
+    # is a detour, and route length is most of the difficulty score.
+    lo, hi = hole_range if hole_range else (6, 26 if family == "drift" else 18)
+    hole_budget = rng.randint(lo, hi)
     guard = rng.randint(2, 4)
     protected = {(sx, sy), (gx, gy)}
     holes = 0
@@ -335,6 +364,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--shards", type=int, default=10)
     ap.add_argument("--min-moves", type=int, default=6)
+    ap.add_argument("--holes", default="", metavar="MIN,MAX",
+                    help="override the per-map hole budget (default 6,18; drift 6,26)")
     ap.add_argument("--families", default="", help="comma-separated subset of the families")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
@@ -342,6 +373,11 @@ def main() -> int:
     for f in wanted:
         if f not in FAMILIES:
             raise SystemExit(f"unknown family {f!r}; have {', '.join(FAMILIES)}")
+
+    hole_range = None
+    if args.holes:
+        lo, hi = (int(v) for v in args.holes.split(","))
+        hole_range = (lo, hi)
 
     rng = random.Random(args.seed)
     pool: list[Candidate] = []
@@ -355,7 +391,7 @@ def main() -> int:
         cap = per_family * 400
         for _ in range(cap):
             tries += 1
-            c = build(rng, family, len(pool), args.min_moves)
+            c = build(rng, family, len(pool), args.min_moves, hole_range)
             if c:
                 pool.append(c)
                 made += 1

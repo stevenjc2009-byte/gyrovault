@@ -8,6 +8,8 @@
  *     OK <tier> <tol> <cost> <difficulty> <moves> <pulses> <states> <holes> <name>
  *     BADMAP <name>    (level_parse rejected it)
  *     UNSOLVED <name>  (no route at any tolerance)
+ * and with --tol0, which only asks whether a route exists at all:
+ *     SOLVED <cost> <name>
  * The name comes last because vault names contain spaces; a blank NAME becomes "-".
  *
  * Grading is the expensive step — measured at up to ~22 s for one hard map — so the
@@ -64,12 +66,16 @@ int main(int argc, char **argv)
     char rows[LEVEL_H][LEVEL_W + 1], name[MAX_NAME];
     const char *row_ptrs[LEVEL_H];
     FILE *f;
-    int y;
+    int y, tol0;
 
     if (argc < 2) {
-        fprintf(stderr, "usage: level_grade <maps-file>\n");
+        fprintf(stderr, "usage: level_grade <maps-file> [--tol0]\n");
         return 2;
     }
+    /* --tol0 answers only "is there any route at all", at the loosest setting, which is
+     * one Dijkstra instead of up to seven and skips the robustness sampling entirely.
+     * Used to check a hazard's patrol has not sealed a vault. */
+    tol0 = argc > 2 && strcmp(argv[2], "--tol0") == 0;
     f = fopen(argv[1], "rb");
     if (!f) {
         fprintf(stderr, "level_grade: cannot open %s\n", argv[1]);
@@ -88,9 +94,11 @@ int main(int argc, char **argv)
             fflush(stdout);
             continue;
         }
-        rep = grade(&lv);
+        rep = tol0 ? solve_at(&lv, 0) : grade(&lv);
         if (!rep.solved)
             printf("UNSOLVED %s\n", tag);
+        else if (tol0)
+            printf("SOLVED %d %s\n", rep.cost, tag); /* no tier: only one tolerance was tried */
         else
             printf("OK %d %d %d %d %d %d %d %d %s\n", rep.tier, SOLVE_TOLERANCES[rep.tier],
                    rep.cost, rep.difficulty, rep.moves, rep.pulses, rep.states, count_holes(&lv),
