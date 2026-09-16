@@ -240,6 +240,43 @@ static void draw_goal(float px, float py, float time_s)
     }
 }
 
+/* Hazards move, so they are never baked into board_cache_tex - render_board() always
+ * draws them live, on top, same as draw_goal(). Board-space (x, y) match ball.x/ball.y's
+ * convention (no BOARD_TOP_PX baked in), so BOARD_TOP_PX is added here at draw time,
+ * exactly as render_ball()/draw_hole()/draw_goal() do. */
+static void draw_hazard(const Hazard *h, float time_s)
+{
+    if (!h || h->length <= 0.0f)
+        return;
+
+    float x0 = h->x0, y0 = BOARD_TOP_PX + h->y0;
+    float x1 = h->x1, y1 = BOARD_TOP_PX + h->y1;
+
+    /* faint patrol-line marker so the player can see where it travels before it arrives */
+    vita2d_draw_line(x0, y0, x1, y1, RGBA8(240, 70, 70, 36));
+
+    float px, py;
+    level_hazard_pos(h, time_s, &px, &py);
+    py += BOARD_TOP_PX;
+
+    /* spinning spokes: a cheap motion cue distinct from the goal's pulsing glow */
+    const float half_pi = 1.5707963f;
+    float spin = time_s * 6.0f;
+    for (int i = 0; i < 4; i++) {
+        float a = spin + i * half_pi;
+        float sx = px + cosf(a) * (HAZARD_RADIUS_PX + 5.0f);
+        float sy = py + sinf(a) * (HAZARD_RADIUS_PX + 5.0f);
+        vita2d_draw_line(px, py, sx, sy, RGBA8(255, 90, 60, 140));
+    }
+
+    vita2d_draw_fill_circle(px + 1.5f, py + 2.0f, HAZARD_RADIUS_PX + 2.0f, RGBA8(0, 0, 0, 90)); /* shadow */
+    vita2d_draw_fill_circle(px, py, HAZARD_RADIUS_PX + 1.5f, RGBA8(60, 8, 8, 255));   /* dark rim */
+    vita2d_draw_fill_circle(px, py, HAZARD_RADIUS_PX, RGBA8(220, 40, 30, 255));       /* lethal red body */
+    float pulse = 0.5f + 0.5f * sinf(time_s * 8.0f);
+    vita2d_draw_fill_circle(px, py, HAZARD_RADIUS_PX * 0.5f,
+                            RGBA8(255, (int)(160 + 60 * pulse), 40, 255));
+}
+
 int render_board_cache(const Level *lv)
 {
     if (!lv)
@@ -288,7 +325,7 @@ int render_board_cache(const Level *lv)
     return 0;
 }
 
-void render_board(const Level *lv, float time_s)
+void render_board(const Level *lv, float time_s, float hazard_t)
 {
     if (board_cache_tex) {
         /* Cached path: static floor/walls/holes come from the pre-rendered
@@ -303,6 +340,8 @@ void render_board(const Level *lv, float time_s)
                 }
             }
         }
+        for (int i = 0; i < lv->hazard_count; i++)
+            draw_hazard(&lv->hazards[i], hazard_t);
         return;
     }
 
@@ -325,6 +364,8 @@ void render_board(const Level *lv, float time_s)
         for (int cx = 0; cx < LEVEL_W; cx++)
             if (is_wall(lv, cx, cy))
                 draw_wall(lv, cx, cy);
+    for (int i = 0; i < lv->hazard_count; i++)
+        draw_hazard(&lv->hazards[i], hazard_t);
 }
 
 void render_ball(const Ball *b, float scale)

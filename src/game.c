@@ -28,6 +28,8 @@
 #define COL_GREY   RGBA8(95, 98, 104, 255)
 
 #define SELECT_COLS 5  /* level-select grid columns */
+#define SELECT_ROWS 4  /* level-select grid rows per page */
+#define SELECT_PAGE (SELECT_COLS * SELECT_ROWS)  /* tiles per page */
 
 typedef enum { SCENE_MENU, SCENE_SELECT, SCENE_PLAY, SCENE_UPDATES } Scene;
 typedef enum { PLAY_HOLD, PLAY_RECAL, PLAY_RUN, PLAY_FELL, PLAY_PAUSED, PLAY_CLEARED } PlayState;
@@ -55,8 +57,21 @@ static int       calibrated_flat_this_session = 0;
 /* Per-vault elapsed play time; only advances during PLAY_RUN. */
 static float     play_time_s = 0.0f;
 
+/* Hazard phase: seconds since the ball was last placed at the start of the vault.
+ * Separate from play_time_s, which is zeroed the instant the ball dies so the HUD timer
+ * blanks -- the hazards have to stay put for the fall animation. Separate from clock_s,
+ * which never stops, because where a hazard is when you start rolling must not depend on
+ * how long you sat in the menu. Both the collision test and the drawing read this one
+ * clock: running them off different clocks would put the deadly hazard somewhere other
+ * than the one on screen. */
+static float     hazard_t = 0.0f;
+
 /* Wall-hit sound rate limit. */
 static float     wall_sound_cd = 0.0f;
+
+/* Set when the current PLAY_FELL was entered because a hazard caught the ball
+ * rather than the ball falling into a hole, so the caption reads correctly. */
+static int       fell_to_hazard = 0;
 
 /* Result of the vault just cleared, captured on PHYS_GOAL for the completion screen. */
 static uint32_t  cleared_time_cs = TIMER_NONE;
@@ -128,6 +143,7 @@ static void enter_level(int index)
     play_state = PLAY_HOLD;
     state_timer = 0.0f;
     play_time_s = 0.0f;
+    hazard_t = 0.0f;
     wall_sound_cd = 0.0f;
     save_failed = 0;
     /* Once a flat recalibration has happened this session, vault-start no longer
@@ -180,12 +196,32 @@ static void scene_menu(void)
     render_text(12, SCREEN_H - 26, COL_DIM, TEXT_SMALL, "Up/Down: choose   X: select");
 }
 
+/* Number of pages needed to show LEVEL_COUNT tiles at SELECT_PAGE per page. */
+static int select_page_count(void)
+{
+    return (LEVEL_COUNT + SELECT_PAGE - 1) / SELECT_PAGE;
+}
+
+/* Move to the given page (wrapped), keeping the cursor on the same slot within
+ * the page, clamped to the last valid index if that page is short. */
+static void select_goto_page(int page)
+{
+    int pages = select_page_count();
+    page = ((page % pages) + pages) % pages;
+    int slot = select_sel % SELECT_PAGE;
+    int t = page * SELECT_PAGE + slot;
+    if (t >= LEVEL_COUNT) t = LEVEL_COUNT - 1;
+    select_sel = t;
+}
+
 static void scene_select(void)
 {
     if (hit(SCE_CTRL_LEFT))  select_sel = (select_sel + LEVEL_COUNT - 1) % LEVEL_COUNT;
     if (hit(SCE_CTRL_RIGHT)) select_sel = (select_sel + 1) % LEVEL_COUNT;
     if (hit(SCE_CTRL_UP))    select_sel = select_move_vert(select_sel, -SELECT_COLS);
     if (hit(SCE_CTRL_DOWN))  select_sel = select_move_vert(select_sel, SELECT_COLS);
+    if (hit(SCE_CTRL_LTRIGGER)) select_goto_page(select_sel / SELECT_PAGE - 1);
+    if (hit(SCE_CTRL_RTRIGGER)) select_goto_page(select_sel / SELECT_PAGE + 1);
     if (hit(SCE_CTRL_CIRCLE)) scene = SCENE_MENU;
     if (hit(SCE_CTRL_CROSS) && save_level_open(&save, select_sel))
         enter_level(select_sel);
@@ -193,15 +229,22 @@ static void scene_select(void)
     render_steel_background();
     render_text_centered(SCREEN_W * 0.5f, 40, COL_TEXT, TEXT_BIG, "Level Select");
 
-    /* 5-column grid, rows as needed; laid out by fixed column slot (the short
-     * last row is not re-centred) so on-screen position matches select_move_vert's
-     * column-preserving math. */
+    /* 5-column grid, SELECT_ROWS rows per page; laid out by fixed column slot
+     * (the short last row is not re-centred) so on-screen position matches
+     * select_move_vert's column-preserving math. */
     const float cw = 170, ch = 80, col_gap = 15, row_gap = 10, grid_top = 92;
     const float total_w = SELECT_COLS * cw + (SELECT_COLS - 1) * col_gap;
     const float grid_x0 = (SCREEN_W - total_w) * 0.5f;
 
-    for (int i = 0; i < LEVEL_COUNT; i++) {
-        int col = i % SELECT_COLS, row = i / SELECT_COLS;
+    int page = select_sel / SELECT_PAGE;
+    int pages = select_page_count();
+    int page_start = page * SELECT_PAGE;
+    int page_end = page_start + SELECT_PAGE;
+    if (page_end > LEVEL_COUNT) page_end = LEVEL_COUNT;
+
+    for (int i = page_start; i < page_end; i++) {
+        int pi = i - page_start;
+        int col = pi % SELECT_COLS, row = pi / SELECT_COLS;
         float x = grid_x0 + col * (cw + col_gap), y = grid_top + row * (ch + row_gap);
         int failed = !level_ok[i];
         int locked = failed || !save_level_open(&save, i);
@@ -223,6 +266,16 @@ static void scene_select(void)
         }
     }
 
+    if (pages > 1) {
+        char pbuf[24];
+        snprintf(pbuf, sizeof pbuf, "Page %d/%d", page + 1, pages);
+        render_text_centered(SCREEN_W * 0.5f, grid_top - 20, COL_DIM, TEXT_SMALL, pbuf);
+        render_text(grid_x0, grid_top - 20, COL_DIM, TEXT_SMALL, "< L");
+        const char *rhint = "R >";
+        render_text(grid_x0 + total_w - render_text_width(TEXT_SMALL, rhint), grid_top - 20,
+                    COL_DIM, TEXT_SMALL, rhint);
+    }
+
     int sel_unavailable = !level_ok[select_sel];
     int sel_locked = !sel_unavailable && !save_level_open(&save, select_sel);
     const char *name = level_ok[select_sel] && levels[select_sel].name ? levels[select_sel].name : "(unavailable)";
@@ -232,12 +285,13 @@ static void scene_select(void)
     else if (sel_locked)
         render_text_centered(SCREEN_W * 0.5f, 482, COL_RED, TEXT_SMALL, "Clear the previous vault to unlock");
 
-    render_text(12, SCREEN_H - 26, COL_DIM, TEXT_SMALL, "X: play   O: back");
+    const char *hint = pages > 1 ? "X: play   O: back   L/R: page" : "X: play   O: back";
+    render_text(12, SCREEN_H - 26, COL_DIM, TEXT_SMALL, hint);
 }
 
 static void draw_play_world(float ball_scale, const char *time_text)
 {
-    render_board(&levels[cur_level], clock_s);
+    render_board(&levels[cur_level], clock_s, hazard_t);
     render_ball(&ball, ball_scale);
     render_hud(&levels[cur_level], cur_level, time_text);
 }
@@ -295,6 +349,7 @@ static void scene_play(float dt)
             calibrated_flat_this_session = 1;
             physics_reset(&ball, lv);
             play_time_s = 0.0f;
+            hazard_t = 0.0f;
             play_state = PLAY_RUN;
         } else if (hit(SCE_CTRL_CIRCLE)) {
             play_state = PLAY_PAUSED; /* back out without touching calibration */
@@ -309,6 +364,7 @@ static void scene_play(float dt)
             break;
         }
         play_time_s += dt;
+        hazard_t += dt;
         motion_read(&tx, &ty);
         float wall_impact = 0.0f;
         PhysResult r = physics_step(&ball, lv, tx, ty, dt, &wall_impact);
@@ -323,11 +379,15 @@ static void scene_play(float dt)
             wall_sound_cd = WALL_HIT_COOLDOWN;
         }
 
-        if (r == PHYS_FELL) {
+        int hazard_caught = (r == PHYS_ROLLING) &&
+            level_hazard_hit(lv, hazard_t, ball.x, ball.y, BALL_RADIUS);
+
+        if (r == PHYS_FELL || hazard_caught) {
             sound_play(SND_FELL, 1.0f);
             play_state = PLAY_FELL;
             state_timer = 0.0f;
             play_time_s = 0.0f;
+            fell_to_hazard = hazard_caught;
         } else if (r == PHYS_GOAL) {
             sound_play(SND_GOAL, 1.0f);
             cleared_time_cs = timer_to_cs(play_time_s);
@@ -351,9 +411,11 @@ static void scene_play(float dt)
         }
         if (((int)(state_timer * 8)) % 2 == 0)
             render_dim(70);
-        render_text_centered(SCREEN_W * 0.5f, 230, COL_RED, TEXT_TITLE * 0.8f, "Fell in!");
+        render_text_centered(SCREEN_W * 0.5f, 230, COL_RED, TEXT_TITLE * 0.8f,
+                             fell_to_hazard ? "Caught!" : "Fell in!");
         if (state_timer >= FELL_SECONDS) {
             physics_reset(&ball, lv);
+            hazard_t = 0.0f; /* the retry restarts the patrols, not just the ball */
             motion_read(&tx, &ty); /* keep the filter warm */
             play_state = PLAY_RUN;
         }
