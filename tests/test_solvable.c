@@ -1,265 +1,98 @@
-/* Solvability + difficulty ramp for every level, driven through the real physics_step.
- *
- * A player's move is modelled as a straight tilt in one of 4 directions, fed through the
- * same low-pass filter and dead zone as motion.c: either a HOLD (tilt for 3 s, release,
- * coast to rest) or a PULSE of 2..24 frames then coast. Dijkstra over resting positions
- * (4 px bins) finds the cheapest route to the goal: a hold costs 10, a pulse 10 + 60 /
- * (how many neighbouring pulse lengths stop in the same cell).
- *
- * PRECISION is what makes a level hard for a player, so a move only counts at tolerance T
- * if it still gives the same outcome (same resting cell, or the goal) when the ball starts
- * T px off in any of the 4 directions. Each level is solved at T = 20, 16, 12, 8, 5, 3, 0 px
- * and graded by the loosest T that has a route (tier 0 = 20 px, easiest), then by route cost:
- * difficulty = tier * 1000 + cost.
+/* Solvability + difficulty ramp for every level. The solver itself lives in solve_core.c,
+ * which documents how a move is modelled and how difficulty is scored; tools/level_grade.c
+ * grades candidate mazes with the same code.
  *
  * Fails if any level has no route, or (when every level is run) if difficulty does not
- * rise from each level to the next. */
-#include <math.h>
+ * rise from each level to the next. Pass a level index as argv[1] to grade just that one,
+ * which skips the ramp check. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "level.h"
-#include "physics.h"
+#include "physics.h" /* BALL_RADIUS, for the hazard-clearance check below */
+#include "solve_core.h"
 #include "test.h"
 
-#define DT            (1.0f / 60.0f)
-#define FILTER_ALPHA  0.25f /* mirrors motion.c */
-#define DEAD_ZONE     0.05f /* mirrors motion.c */
-#define HOLD_FRAMES   180
-#define PULSE_MIN     2
-#define PULSE_MAX     24
-#define COAST_MAX     600
-#define BIN_PX        4.0f
-#define MAX_STATES    60000
-#define HASH_SIZE     (1 << 18)
-#define COST_HOLD     10
-#define COST_PULSE    10 /* plus 60 / window_frames */
-#define UNUSABLE      (-1)
-
-static const int TOLERANCES[] = {20, 16, 12, 8, 5, 3, 0};
-#define TIER_COUNT (int)(sizeof TOLERANCES / sizeof TOLERANCES[0])
-
-static const int DIRX[4] = {1, -1, 0, 0}, DIRY[4] = {0, 0, 1, -1};
-static const char DIRC[4] = {'R', 'L', 'D', 'U'};
-
-typedef struct {
-    float x, y;
-    int cost, parent, frames, dir, done;
-} Node;
-
-typedef struct {
-    int solved, tier, cost, difficulty, moves, pulses, states;
-    char route[512];
-} Report;
-
-static Node nodes[MAX_STATES];
-static int n_nodes;
-static int hash_tab[HASH_SIZE]; /* node index + 1, 0 = empty */
-
-static float dead_zone(float v)
+/* Copy `src` into `out` with every cell a hazard sweeps turned to wall, and return how
+ * many cells that was. "Sweeps" means: a ball parked at that cell's centre would be
+ * touching the hazard at some point in its patrol, i.e. the centre is within
+ * HAZARD_RADIUS_PX + BALL_RADIUS of the patrol segment. The patrol runs between two
+ * arbitrary cells and need not be axis-aligned, so this measures distance to the segment
+ * rather than stepping along it. Distances stay squared -- no sqrtf, and no rounding to
+ * argue about. */
+static int mask_hazards(const Level *src, Level *out)
 {
-    float mag = v < 0.0f ? -v : v;
-    if (mag < DEAD_ZONE)
-        return 0.0f;
-    mag = (mag - DEAD_ZONE) / (1.0f - DEAD_ZONE);
-    return v < 0.0f ? -mag : mag;
-}
+    const float reach = HAZARD_RADIUS_PX + BALL_RADIUS;
+    int k, x, y, masked = 0;
 
-/* Tilt toward dir for on_frames, then release and coast. *out holds the resting ball when
- * the result is PHYS_ROLLING. */
-static PhysResult simulate(const Level *lv, float x, float y, int dir, int on_frames, Ball *out)
-{
-    Ball b = {x, y, 0.0f, 0.0f};
-    float filt = 0.0f;
-    int f;
-
-    for (f = 0; f < on_frames + COAST_MAX; f++) {
-        float target = f < on_frames ? 1.0f : 0.0f, t;
-        PhysResult r;
-        filt += FILTER_ALPHA * (target - filt);
-        t = dead_zone(filt);
-        r = physics_step(&b, lv, t * (float)DIRX[dir], t * (float)DIRY[dir], DT, NULL);
-        if (r != PHYS_ROLLING)
-            return r;
-        if (f >= on_frames && t == 0.0f && b.vx == 0.0f && b.vy == 0.0f)
-            break;
-    }
-    *out = b;
-    return PHYS_ROLLING;
-}
-
-static int cell_key(float x, float y)
-{
-    return (int)(x / CELL_PX) * 64 + (int)(y / CELL_PX);
-}
-
-/* The move's outcome if it is the same from the ball's spot and from tol px off in each
- * of the 4 directions; UNUSABLE if any of those falls or stops in a different cell. */
-static int robust_move(const Level *lv, float x, float y, int dir, int frames, int tol, Ball *out)
-{
-    static const int OX[4] = {1, -1, 0, 0}, OY[4] = {0, 0, 1, -1};
-    PhysResult r = simulate(lv, x, y, dir, frames, out);
-    int k;
-
-    if (r == PHYS_FELL)
-        return UNUSABLE;
-    for (k = 0; tol > 0 && k < 4; k++) {
-        Ball e;
-        PhysResult r2 = simulate(lv, x + (float)(OX[k] * tol), y + (float)(OY[k] * tol), dir, frames, &e);
-        if (r2 != r || (r == PHYS_ROLLING && cell_key(e.x, e.y) != cell_key(out->x, out->y)))
-            return UNUSABLE;
-    }
-    return (int)r;
-}
-
-static int bin_key(float x, float y)
-{
-    return (int)floor(x / BIN_PX) * 1024 + (int)floor(y / BIN_PX) + 1;
-}
-
-static int find_or_add(float x, float y)
-{
-    int key = bin_key(x, y);
-    unsigned h = (unsigned)key * 2654435761u;
-    for (;;) {
-        int slot = (int)(h & (HASH_SIZE - 1));
-        int id = hash_tab[slot];
-        if (id == 0) {
-            if (n_nodes >= MAX_STATES - 1) /* last slot is the goal pseudo-node */
-                return -1;
-            hash_tab[slot] = n_nodes + 1;
-            memset(&nodes[n_nodes], 0, sizeof nodes[n_nodes]);
-            nodes[n_nodes].x = x;
-            nodes[n_nodes].y = y;
-            nodes[n_nodes].cost = 1 << 30;
-            nodes[n_nodes].parent = -1;
-            return n_nodes++;
-        }
-        if (bin_key(nodes[id - 1].x, nodes[id - 1].y) == key)
-            return id - 1;
-        h++;
-    }
-}
-
-static void relax(int from, int to_cost, int dir, int frames, int result, float x, float y,
-                  int *goal_cost)
-{
-    int id = result == PHYS_GOAL ? MAX_STATES - 1 : find_or_add(x, y);
-    if (id < 0)
-        return;
-    if (result == PHYS_GOAL) {
-        if (to_cost >= *goal_cost)
-            return;
-        *goal_cost = to_cost;
-    } else if (to_cost >= nodes[id].cost || nodes[id].done) {
-        return;
-    }
-    nodes[id].cost = to_cost;
-    nodes[id].parent = from;
-    nodes[id].dir = dir;
-    nodes[id].frames = frames;
-}
-
-static Report solve_at(const Level *lv, int tol)
-{
-    Report rep;
-    int goal_cost = 1 << 30, start;
-
-    memset(&rep, 0, sizeof rep);
-    memset(hash_tab, 0, sizeof hash_tab);
-    n_nodes = 0;
-    start = find_or_add(lv->start_x, lv->start_y);
-    nodes[start].cost = 0;
-
-    for (;;) {
-        int best = -1, i, dir;
-        for (i = 0; i < n_nodes; i++) /* linear scan: state counts stay in the thousands */
-            if (!nodes[i].done && (best < 0 || nodes[i].cost < nodes[best].cost))
-                best = i;
-        if (best < 0 || nodes[best].cost >= goal_cost)
-            break;
-        nodes[best].done = 1;
-
-        for (dir = 0; dir < 4; dir++) {
-            float bx = nodes[best].x, by = nodes[best].y;
-            Ball end, ends[PULSE_MAX + 1];
-            int r[PULSE_MAX + 1], f, run_start;
-
-            r[0] = robust_move(lv, bx, by, dir, HOLD_FRAMES, tol, &end);
-            if (r[0] != UNUSABLE)
-                relax(best, nodes[best].cost + COST_HOLD, dir, HOLD_FRAMES, r[0], end.x, end.y,
-                      &goal_cost);
-
-            for (f = PULSE_MIN; f <= PULSE_MAX; f++)
-                r[f] = robust_move(lv, bx, by, dir, f, tol, &ends[f]);
-
-            /* Consecutive pulse lengths with the same outcome cell form one window; its
-             * middle length becomes the edge. */
-            run_start = PULSE_MIN;
-            for (f = PULSE_MIN + 1; f <= PULSE_MAX + 1; f++) {
-                int same = f <= PULSE_MAX && r[f] == r[run_start] &&
-                           (r[f] != PHYS_ROLLING ||
-                            cell_key(ends[f].x, ends[f].y) == cell_key(ends[run_start].x, ends[run_start].y));
-                if (!same) {
-                    int w = f - run_start, mid = run_start + w / 2;
-                    if (r[run_start] != UNUSABLE)
-                        relax(best, nodes[best].cost + COST_PULSE + 60 / w, dir, mid, r[run_start],
-                              ends[mid].x, ends[mid].y, &goal_cost);
-                    run_start = f;
+    *out = *src;
+    for (k = 0; k < src->hazard_count; k++) {
+        const Hazard *h = &src->hazards[k];
+        float dx = h->x1 - h->x0, dy = h->y1 - h->y0;
+        float len2 = dx * dx + dy * dy;
+        for (y = 1; y < LEVEL_H - 1; y++) {
+            for (x = 1; x < LEVEL_W - 1; x++) {
+                float px = x * CELL_PX + CELL_PX / 2.0f;
+                float py = y * CELL_PX + CELL_PX / 2.0f;
+                float t = len2 > 0.0f ? ((px - h->x0) * dx + (py - h->y0) * dy) / len2 : 0.0f;
+                float ox, oy;
+                if (t < 0.0f)
+                    t = 0.0f;
+                else if (t > 1.0f)
+                    t = 1.0f;
+                ox = px - (h->x0 + t * dx);
+                oy = py - (h->y0 + t * dy);
+                if (ox * ox + oy * oy <= reach * reach && out->cells[y][x] != CELL_WALL) {
+                    out->cells[y][x] = CELL_WALL;
+                    masked++;
                 }
             }
         }
     }
-
-    rep.states = n_nodes;
-    if (goal_cost < (1 << 30)) {
-        int path[512], len = 0, i, id = MAX_STATES - 1;
-        size_t pos = 0;
-        while (id != start && len < 512) {
-            path[len++] = id;
-            id = nodes[id].parent;
-        }
-        rep.solved = 1;
-        rep.cost = goal_cost;
-        rep.moves = len;
-        for (i = len - 1; i >= 0; i--) {
-            const Node *nd = &nodes[path[i]];
-            int wrote = nd->frames == HOLD_FRAMES
-                            ? snprintf(rep.route + pos, sizeof rep.route - pos, "%c ", DIRC[nd->dir])
-                            : snprintf(rep.route + pos, sizeof rep.route - pos, "%c%d ", DIRC[nd->dir], nd->frames);
-            rep.pulses += nd->frames != HOLD_FRAMES;
-            if (wrote > 0 && (size_t)wrote < sizeof rep.route - pos)
-                pos += (size_t)wrote;
-        }
-    }
-    return rep;
+    return masked;
 }
 
-/* Loosest tolerance with a route decides the tier. */
-static Report grade(const Level *lv)
+/* Flood fill from the start over cells the ball can come to rest on -- neither wall nor pit
+ * -- and return 1 as soon as it reaches a cell some patrol sweeps. `masked` is the output of
+ * mask_hazards, so a swept cell is one that is not wall in `lv` but is wall in `masked`.
+ *
+ * A patrol walled off from the start is scenery: it can never catch anything, so the vault
+ * ships as if it had no hazard at all. Four-connected and blind to momentum, which makes
+ * this a necessary condition only -- enough, because the failure it exists to catch is a
+ * patrol sealed in a room of its own. */
+static int hazards_reachable(const Level *lv, const Level *masked)
 {
-    Report rep;
-    int t;
-    memset(&rep, 0, sizeof rep);
-    for (t = 0; t < TIER_COUNT; t++) {
-        rep = solve_at(lv, TOLERANCES[t]);
-        if (rep.solved) {
-            rep.tier = t;
-            rep.difficulty = t * 1000 + rep.cost;
-            break;
+    static const int step_x[4] = { 1, -1, 0, 0 }, step_y[4] = { 0, 0, 1, -1 };
+    static unsigned char seen[LEVEL_H][LEVEL_W];
+    static short qx[LEVEL_H * LEVEL_W], qy[LEVEL_H * LEVEL_W];
+    int head = 0, tail = 0, x, y;
+
+    memset(seen, 0, sizeof seen);
+    x = (int)(lv->start_x / CELL_PX);
+    y = (int)(lv->start_y / CELL_PX);
+    seen[y][x] = 1;
+    qx[tail] = (short)x;
+    qy[tail] = (short)y;
+    tail++;
+    while (head < tail) {
+        int cx = qx[head], cy = qy[head], d;
+        head++;
+        if (lv->cells[cy][cx] != CELL_WALL && masked->cells[cy][cx] == CELL_WALL)
+            return 1;
+        for (d = 0; d < 4; d++) {
+            int nx = cx + step_x[d], ny = cy + step_y[d];
+            if (nx < 0 || ny < 0 || nx >= LEVEL_W || ny >= LEVEL_H || seen[ny][nx])
+                continue;
+            if (lv->cells[ny][nx] == CELL_WALL || lv->cells[ny][nx] == CELL_HOLE)
+                continue;
+            seen[ny][nx] = 1;
+            qx[tail] = (short)nx;
+            qy[tail] = (short)ny;
+            tail++;
         }
     }
-    return rep;
-}
-
-static int count_holes(const Level *lv)
-{
-    int x, y, n = 0;
-    for (y = 0; y < LEVEL_H; y++)
-        for (x = 0; x < LEVEL_W; x++)
-            n += lv->cells[y][x] == CELL_HOLE;
-    return n;
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -286,6 +119,55 @@ int main(int argc, char **argv)
         CHECK(grade(&corridor).solved == 0);
     }
 
+    /* The hazard-clearance check below only ever runs on vaults that have hazards, so
+     * prove here that it can go both ways rather than trusting it to. Same corridor, two
+     * rows tall: a patrol along the lower row leaves the upper one clear, and a patrol
+     * across the only row seals it. */
+    {
+        static Level haz, safe;
+        int x, y;
+        CHECK(level_load(0, &haz) == 0);
+        for (y = 0; y < LEVEL_H; y++)
+            for (x = 0; x < LEVEL_W; x++)
+                haz.cells[y][x] = (x >= 1 && x <= 10 && (y == 1 || y == 2)) ? CELL_FLOOR : CELL_WALL;
+        haz.cells[1][10] = CELL_GOAL;
+        haz.start_x = 1 * CELL_PX + CELL_PX / 2;
+        haz.start_y = 1 * CELL_PX + CELL_PX / 2;
+        haz.hazard_count = 1;
+        haz.hazards[0].x0 = 4 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].y0 = 2 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].x1 = 7 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].y1 = 2 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].length = 3 * CELL_PX;
+        /* Four cells of the lower row, and nothing in the row the ball needs. */
+        CHECK(mask_hazards(&haz, &safe) == 4);
+        CHECK(safe.cells[1][5] == CELL_FLOOR);
+        CHECK(solve_at(&safe, 0).solved == 1);
+
+        /* Stand the same patrol on end so it crosses both rows: now there is no way past
+         * it, and the check has to say so. */
+        haz.hazards[0].x0 = haz.hazards[0].x1 = 5 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].y0 = 1 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].y1 = 2 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].length = CELL_PX;
+        CHECK(mask_hazards(&haz, &safe) == 2);
+        CHECK(safe.cells[1][5] == CELL_WALL);
+        CHECK(solve_at(&safe, 0).solved == 0);
+
+        /* Reachability arms both ways on the same fixture. The patrol above lies in the
+         * corridor the ball starts in, so it is reachable; move it into a pocket that
+         * nothing connects to the start and the answer has to flip. */
+        CHECK(hazards_reachable(&haz, &safe) == 1);
+        for (x = 15; x <= 19; x++)
+            haz.cells[5][x] = CELL_FLOOR;
+        haz.hazards[0].x0 = 15 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].x1 = 18 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].y0 = haz.hazards[0].y1 = 5 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].length = 3 * CELL_PX;
+        CHECK(mask_hazards(&haz, &safe) == 4);
+        CHECK(hazards_reachable(&haz, &safe) == 0);
+    }
+
     printf("  %-3s %-22s %5s %4s %5s %5s %6s %6s %6s  route\n", "#", "name", "holes", "tol",
            "cost", "diff", "moves", "pulses", "states");
     for (i = 0; i < LEVEL_COUNT; i++) {
@@ -295,7 +177,7 @@ int main(int argc, char **argv)
         CHECK(level_load(i, &lv) == 0);
         rep = grade(&lv);
         printf("  %-3d %-22s %5d %4d %5d %5d %6d %6d %6d  %s\n", i + 1, lv.name, count_holes(&lv),
-               rep.solved ? TOLERANCES[rep.tier] : -1, rep.solved ? rep.cost : -1,
+               rep.solved ? SOLVE_TOLERANCES[rep.tier] : -1, rep.solved ? rep.cost : -1,
                rep.solved ? rep.difficulty : -1, rep.moves, rep.pulses, rep.states,
                rep.solved ? rep.route : "NO ROUTE");
         CHECK(rep.solved);
@@ -304,6 +186,30 @@ int main(int argc, char **argv)
                 printf("  level %d is not harder than level %d\n", i + 1, i);
             CHECK(rep.difficulty > prev);
             prev = rep.difficulty;
+        }
+
+        /* A hazard must not be the only thing between the ball and the goal. The grade
+         * above is blind to hazards on purpose, so it could be reporting a route that
+         * only works if you out-run one. Wall off every cell a hazard sweeps and ask
+         * again at the loosest tolerance: if a route survives that, the vault can be
+         * finished without ever sharing a cell with a hazard, and the difficulty above is
+         * a floor rather than a fiction. */
+        if (lv.hazard_count > 0) {
+            static Level safe;
+            Report clear;
+            /* Every patrol has two distinct ends, so it must have masked something. */
+            CHECK(mask_hazards(&lv, &safe) >= 2);
+            clear = solve_at(&safe, 0); /* one Dijkstra: keep the result */
+            if (!clear.solved)
+                printf("  level %d cannot be finished without crossing a hazard's path\n", i + 1);
+            CHECK(clear.solved);
+
+            /* ...and it must not be the opposite failure either: a patrol the ball can
+             * never reach catches nothing, so the vault would ship advertising a hazard it
+             * does not really have. */
+            if (!hazards_reachable(&lv, &safe))
+                printf("  level %d has a patrol the ball can never reach\n", i + 1);
+            CHECK(hazards_reachable(&lv, &safe));
         }
     }
     return test_summary("solvable");

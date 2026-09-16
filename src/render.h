@@ -36,7 +36,10 @@ float render_text_width(float scale, const char *s);
  * called, or it failed, for the level currently being drawn, render_board()
  * falls back to drawing everything live. */
 int  render_board_cache(const Level *lv);
-void render_board(const Level *lv, float time_s);
+/* time_s animates the goal glow and never stops; hazard_t is the current attempt's
+ * elapsed time and places the hazards. They are separate because a hazard has to be
+ * drawn exactly where game.c's collision test says it is -- see hazard_t in game.c. */
+void render_board(const Level *lv, float time_s, float hazard_t);
 void render_ball(const Ball *b, float scale);   /* scale < 1 = sinking into a hole */
 void render_hud(const Level *lv, int level_index, const char *time_text); /* time_text NULL = no timer */
 
