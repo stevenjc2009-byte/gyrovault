@@ -2,7 +2,10 @@
 
 A PS Vita homebrew tilt maze. Tilt the console to roll a steel ball through the maze and drop it into the glowing vault hole. Avoid the other holes.
 
-- **20 vaults**, ordered from easy to hardest. Clearing a vault unlocks the next one.
+- **60 vaults**, ordered from easy to hardest by a solver that measures how much precision each one demands.
+  Clearing a vault unlocks the next one.
+- **Moving hazards** patrol ten of the sixty, spread evenly through the back forty. They catch the ball on contact,
+  and every vault they appear in can still be finished without ever crossing one's path.
 - Tilt-only ball control (motion sensor). No stick or d-pad fallback, so PS TV is not supported.
 - Timed runs with a best time per vault, shown on the completion screen with a *New best!* marker.
 - Sound generated in code — a rolling bed that rises with ball speed, wall knocks, pit falls and the goal chime.
@@ -19,9 +22,9 @@ A PS Vita homebrew tilt maze. Tilt the console to roll a steel ball through the 
 
 Scan this with VitaShell's QR reader. A scanned URL ending in `.vpk` is downloaded and offered for install, so the Vita never needs a PC or a USB cable.
 
-![QR code linking to the gyrovault 2.0.2 VPK](docs/install-qr.png)
+![QR code linking to the gyrovault 3.0.0 VPK](docs/install-qr.png)
 
-It encodes `https://github.com/stevenjc2009-byte/gyrovault/releases/download/v2.0.2/gyrovault.vpk`, so it installs **2.0.2** and nothing else. The code is pinned to its own version: this page's code always gives you 2.0.2, and each future release carries its own code for that release.
+It encodes `https://github.com/stevenjc2009-byte/gyrovault/releases/download/v3.0.0/gyrovault.vpk`, so it installs **3.0.0** and nothing else. The code is pinned to its own version: this page's code always gives you 3.0.0, and each future release carries its own code for that release.
 
 If VitaShell fails on it — it has [known](https://github.com/TheOfficialFloW/VitaShell/issues/280) [trouble](https://github.com/TheOfficialFloW/VitaShell/issues/414) with GitHub release links — scan it with [Vita VPK Installer Direct](https://github.com/theheroGAC/Vita-VPKInstaller-Direct) instead, which handles the redirect with libcurl. On firmware without TLS 1.2, downloads from GitHub need iTLS-Enso.
 
@@ -30,7 +33,7 @@ If VitaShell fails on it — it has [known](https://github.com/TheOfficialFloW/V
 | Where | Input |
 |---|---|
 | Menus | D-pad to choose, Cross to select, Circle to go back |
-| Level Select | D-pad moves around the 5 × 4 grid; locked vaults can't be picked |
+| Level Select | D-pad moves around the 5 × 4 grid, L and R change page; locked vaults can't be picked |
 | Playing | Tilt the Vita. START pauses (Resume / Recalibrate / Quit to menu) |
 
 When a vault starts, hold the Vita in your comfortable "level" position for a second. That pose becomes neutral, and a tilt indicator shows what is being read while you hold it.

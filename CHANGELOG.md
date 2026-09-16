@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.0.0] - 2026-09-16
+
+### Added
+- **Forty more vaults, sixty in all.** Vaults 21 to 60 were picked from 2,400 generated candidates and scored by the same solver the test suite uses, so the ramp from easy to hardest is measured rather than guessed. Every new vault is harder than *Lattice*, which was the hardest vault in 2.0.2, and the sixty rise strictly from first to last.
+- **Moving hazards.** Ten of the new vaults are patrolled by a hazard that slides back and forth along a fixed line and catches the ball on contact: *Tumbler* (23), *Chicane* (27), *Ratline* (31), *Carousel* (35), *Slipstream* (39), *Paternoster* (43), *The Escapement* (47), *Cataract* (51), *Pendulum* (55) and *Clockwork* (59). Every one of those vaults can be finished without ever crossing a patrol — the test suite re-grades each of them with the swept cells walled off and fails the build if a route does not survive. Being caught says **Caught!** rather than *Fell in!*, and a retry restarts the patrols along with the ball.
+- **Paged level select.** L and R move between pages of twenty, and the page you are on is shown under the grid.
+
+### Fixed
+- **Vault 21 would have stayed locked after updating from 2.0.2.** A save records how far you have unlocked, and loading clamped that number to the number of vaults the running build has. A player who had finished all 20 had it stored as 20, the clamp left it at 20, and the twenty-first vault would never have opened. The unlock is now re-derived from the record of which vaults you have completed, which cannot go stale when the count changes.
+- **A save could have been wiped by the jump from 20 vaults to 60.** The save format's newest revision measured a stored save against the size the *running build* expects, so growing the vault count would have made every existing save the wrong length. A save now states how many best-time slots it holds and is only ever measured against that. This never reached a release — 2.0.2 writes the previous revision, which is a fixed size and survives the change — but it was fixed before the vault count moved.
+- **Hazards were drawn from a different clock than the one that could catch you.** The collision test used a timer that resets the moment the ball dies and the drawing used one that never stops, so during the fall animation the hazard on screen was not the hazard you could hit, and time spent in a menu moved the patrols before a vault even started. Both now read one clock: time since the ball was last placed at the start of the vault.
+- **Saving could lose your progress on a power cut.** The save was written to a temporary file, then the old save was deleted, then the temporary file was renamed over it — a window where neither existed. The rename is now tried first and the old save is only cleared if that fails, which is what the Vita needs.
+
 ## [2.0.2] - 2026-09-16
 
 ### Fixed
