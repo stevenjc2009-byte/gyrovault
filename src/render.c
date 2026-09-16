@@ -11,6 +11,11 @@
 
 static vita2d_pgf *font = NULL;
 
+/* Offscreen render of the current level's static board parts (floor, walls,
+ * holes); see render_board_cache(). NULL means "no cache for this level" -
+ * render_board() then draws everything live, as it always used to. */
+static vita2d_texture *board_cache_tex = NULL;
+
 int render_init(void)
 {
     if (vita2d_init_advanced(POOL_SIZE) < 0)
@@ -24,6 +29,10 @@ int render_init(void)
 void render_shutdown(void)
 {
     vita2d_wait_rendering_done();
+    if (board_cache_tex) {
+        vita2d_free_texture(board_cache_tex);
+        board_cache_tex = NULL;
+    }
     if (font) {
         vita2d_free_pgf(font);
         font = NULL;
@@ -113,7 +122,7 @@ void render_panel(float x, float y, float w, float h, int highlighted, int greye
     vita2d_draw_rectangle(x, y, BEVEL, h, RGBA8(hi - 20, hi - 20, hi - 10, 255));
     vita2d_draw_rectangle(x, y + h - BEVEL, w, BEVEL, RGBA8(lo, lo, lo + 4, 255));
     vita2d_draw_rectangle(x + w - BEVEL, y, BEVEL, h, RGBA8(lo + 10, lo + 10, lo + 14, 255));
-    if (highlighted && !greyed) {
+    if (highlighted) { /* greyed tiles keep the cursor border, or the selection is invisible */
         vita2d_draw_rectangle(x - 3, y - 3, w + 6, 2, RGBA8(90, 230, 130, 255));
         vita2d_draw_rectangle(x - 3, y + h + 1, w + 6, 2, RGBA8(90, 230, 130, 255));
         vita2d_draw_rectangle(x - 3, y - 3, 2, h + 6, RGBA8(90, 230, 130, 255));
@@ -231,8 +240,74 @@ static void draw_goal(float px, float py, float time_s)
     }
 }
 
+int render_board_cache(const Level *lv)
+{
+    if (!lv)
+        return -1;
+
+    vita2d_texture *tex = vita2d_create_empty_texture_rendertarget(
+        SCREEN_W, SCREEN_H, SCE_GXM_TEXTURE_FORMAT_U8U8U8U8_ABGR);
+    if (!tex) {
+        /* Drop any stale cache from a previous level so render_board() falls
+         * back to drawing THIS level live, instead of showing the wrong one. */
+        if (board_cache_tex) {
+            vita2d_wait_rendering_done();
+            vita2d_free_texture(board_cache_tex);
+            board_cache_tex = NULL;
+        }
+        return -1;
+    }
+
+    /* Bake every static part in the same order render_board() used to draw
+     * them live: floor, then holes, then walls last (so wall shadows still
+     * fall over the floor/holes). CELL_GOAL is animated (time_s) and is
+     * never baked - render_board() always draws it live, on top. */
+    vita2d_start_drawing_advanced(tex, 0);
+    vita2d_clear_screen();
+    draw_floor();
+    for (int cy = 0; cy < LEVEL_H; cy++) {
+        for (int cx = 0; cx < LEVEL_W; cx++) {
+            if (level_cell(lv, cx, cy) == CELL_HOLE) {
+                float px = cx * CELL_PX + CELL_PX * 0.5f;
+                float py = BOARD_TOP_PX + cy * CELL_PX + CELL_PX * 0.5f;
+                draw_hole(px, py);
+            }
+        }
+    }
+    for (int cy = 0; cy < LEVEL_H; cy++)
+        for (int cx = 0; cx < LEVEL_W; cx++)
+            if (is_wall(lv, cx, cy))
+                draw_wall(lv, cx, cy);
+    vita2d_end_drawing();
+
+    if (board_cache_tex) {
+        vita2d_wait_rendering_done();
+        vita2d_free_texture(board_cache_tex);
+    }
+    board_cache_tex = tex;
+    return 0;
+}
+
 void render_board(const Level *lv, float time_s)
 {
+    if (board_cache_tex) {
+        /* Cached path: static floor/walls/holes come from the pre-rendered
+         * texture; only the goal glow (time-dependent) is drawn live on top. */
+        vita2d_draw_texture(board_cache_tex, 0, 0);
+        for (int cy = 0; cy < LEVEL_H; cy++) {
+            for (int cx = 0; cx < LEVEL_W; cx++) {
+                if (level_cell(lv, cx, cy) == CELL_GOAL) {
+                    float px = cx * CELL_PX + CELL_PX * 0.5f;
+                    float py = BOARD_TOP_PX + cy * CELL_PX + CELL_PX * 0.5f;
+                    draw_goal(px, py, time_s);
+                }
+            }
+        }
+        return;
+    }
+
+    /* Fallback: no cache for this level (never baked, or baking failed) -
+     * draw everything live, exactly as before render_board_cache() existed. */
     draw_floor();
     for (int cy = 0; cy < LEVEL_H; cy++) {
         for (int cx = 0; cx < LEVEL_W; cx++) {
@@ -282,7 +357,7 @@ void render_ball(const Ball *b, float scale)
     vita2d_draw_fill_circle(x - r * 0.40f, y - r * 0.44f, r * 0.10f, RGBA8(255, 255, 255, 255));
 }
 
-void render_hud(const Level *lv, int level_index)
+void render_hud(const Level *lv, int level_index, const char *time_text)
 {
     vita2d_draw_rectangle(0, 0, SCREEN_W, BOARD_TOP_PX, RGBA8(18, 20, 24, 255));
     vita2d_draw_rectangle(0, BOARD_TOP_PX - 1, SCREEN_W, 1, RGBA8(90, 96, 108, 255));
@@ -292,4 +367,52 @@ void render_hud(const Level *lv, int level_index)
     const char *hint = "START: pause";
     render_text(SCREEN_W - 10 - render_text_width(TEXT_SMALL, hint), 3, RGBA8(150, 158, 170, 255),
                 TEXT_SMALL, hint);
+    if (time_text)
+        render_text_centered(SCREEN_W * 0.5f, 3, RGBA8(225, 230, 238, 255), TEXT_SMALL, time_text);
+}
+
+/* ---------- overlays ---------- */
+
+void render_tilt_gauge(float cx, float cy, float radius, float tilt_x, float tilt_y)
+{
+    /* steel bezel + recessed dial face, matching render_panel()'s bevel look */
+    vita2d_draw_fill_circle(cx, cy, radius + 3.0f, RGBA8(20, 22, 26, 220));
+    vita2d_draw_fill_circle(cx, cy, radius, RGBA8(92, 100, 114, 255));
+    vita2d_draw_fill_circle(cx, cy, radius - BEVEL, RGBA8(34, 37, 43, 255));
+
+    /* crosshair */
+    vita2d_draw_rectangle(cx - radius + BEVEL + 3, cy - 1, (radius - BEVEL - 3) * 2, 2,
+                          RGBA8(120, 128, 140, 130));
+    vita2d_draw_rectangle(cx - 1, cy - radius + BEVEL + 3, 2, (radius - BEVEL - 3) * 2,
+                          RGBA8(120, 128, 140, 130));
+
+    /* bubble: offset by tilt * radius, clamped so its body stays inside the ring */
+    float ox = tilt_x * radius;
+    float oy = tilt_y * radius;
+    float len = sqrtf(ox * ox + oy * oy);
+    float max_r = radius - BEVEL - 6.0f;
+    if (len > max_r && len > 0.0f) {
+        float s = max_r / len;
+        ox *= s;
+        oy *= s;
+    }
+    ox += cx;
+    oy += cy;
+
+    int level = (fabsf(tilt_x) < 0.05f && fabsf(tilt_y) < 0.05f);
+    unsigned int dot_color = level ? RGBA8(90, 230, 130, 255) : RGBA8(230, 168, 60, 255);
+
+    vita2d_draw_fill_circle(ox + 1.0f, oy + 1.5f, 6.0f, RGBA8(0, 0, 0, 90)); /* shadow */
+    vita2d_draw_fill_circle(ox, oy, 6.0f, RGBA8(22, 24, 30, 255));           /* outline */
+    vita2d_draw_fill_circle(ox, oy, 5.0f, dot_color);
+    vita2d_draw_fill_circle(ox - 1.5f, oy - 1.5f, 2.0f, RGBA8(255, 255, 255, 200)); /* highlight */
+}
+
+void render_flash(float t)
+{
+    if (t < 0.0f || t >= RENDER_FLASH_DURATION)
+        return;
+    float frac = 1.0f - t / RENDER_FLASH_DURATION;
+    unsigned char alpha = (unsigned char)(255.0f * frac);
+    vita2d_draw_rectangle(0, 0, SCREEN_W, SCREEN_H, RGBA8(255, 255, 255, alpha));
 }

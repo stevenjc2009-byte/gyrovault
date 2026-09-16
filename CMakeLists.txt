@@ -13,7 +13,24 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Gyrovault")
 set(VITA_TITLEID  "GYRV00001")
-set(VITA_VERSION  "01.00")
+
+# VITA_VERSION is derived from GV_VERSION in src/version.h so there is a single source of
+# truth for the app version (previously hardcoded here and easy to drift from version.h).
+# GV_VERSION "MAJOR.MINOR.PATCH" -> VITA_VERSION "MM.mm" (two-digit major.minor, no patch).
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h" GV_VERSION_LINE REGEX "^#define GV_VERSION ")
+if(NOT GV_VERSION_LINE MATCHES "\"([0-9]+)\\.([0-9]+)\\.[0-9]+\"")
+  message(FATAL_ERROR "Could not parse GV_VERSION out of src/version.h")
+endif()
+set(GV_VER_MAJOR "${CMAKE_MATCH_1}")
+set(GV_VER_MINOR "${CMAKE_MATCH_2}")
+if(GV_VER_MAJOR LESS 10)
+  set(GV_VER_MAJOR "0${GV_VER_MAJOR}")
+endif()
+if(GV_VER_MINOR LESS 10)
+  set(GV_VER_MINOR "0${GV_VER_MINOR}")
+endif()
+set(VITA_VERSION "${GV_VER_MAJOR}.${GV_VER_MINOR}")
+message(STATUS "VITA_VERSION (derived from GV_VERSION in src/version.h): ${VITA_VERSION}")
 
 option(GV_TEST_INPUT "Emulator-only: d-pad adds tilt (never in release)" OFF)
 
@@ -27,8 +44,8 @@ if(GV_TEST_INPUT)
 endif()
 
 target_link_libraries(gyrovault
-  # ---- UPDATER LIBS (provisional; orchestrator reconciles with the updater agent) ----
-  # (libcurl.pc Libs: curl ... ssl crypto z zstd; updater also uses ScePromoterUtil)
+  # in-app updater: self-update over HTTPS (libcurl.pc Libs: curl ... ssl crypto z zstd;
+  # ScePromoterUtil installs the downloaded VPK)
   curl
   ssl
   crypto
@@ -42,7 +59,6 @@ target_link_libraries(gyrovault
   SceSysmem_stub
   SceKernelModulemgr_stub
   SceProcessmgr_stub
-  # ---- END UPDATER LIBS ----
 
   # graphics / fonts
   vita2d
@@ -68,6 +84,7 @@ target_link_libraries(gyrovault
   SceIofilemgr_stub
   SceKernelThreadMgr_stub
   SceLibKernel_stub
+  SceAudio_stub
   pthread
   c
 )

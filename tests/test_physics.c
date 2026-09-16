@@ -52,7 +52,7 @@ static int drive_no_overlap(const Level *lv, Ball *b, float tx, float ty, float 
     *worst = 1e9f;
     for (i = 0; i < steps; i++) {
         float c;
-        physics_step(b, lv, tx, ty, dt);
+        physics_step(b, lv, tx, ty, dt, NULL);
         c = wall_clearance(lv, b);
         if (c < *worst)
             *worst = c;
@@ -66,11 +66,30 @@ static PhysResult roll_until_capture(const Level *lv, Ball *b, float tx, float t
 {
     int steps = (int)(secs * 60.0f), i;
     for (i = 0; i < steps; i++) {
-        PhysResult r = physics_step(b, lv, tx, ty, 1.0f / 60.0f);
+        PhysResult r = physics_step(b, lv, tx, ty, 1.0f / 60.0f, NULL);
         if (r != PHYS_ROLLING)
             return r;
     }
     return PHYS_ROLLING;
+}
+
+/* Sets the ball moving at vx0 (zero tilt, so it just coasts) toward the border wall and
+ * runs for up to `secs`; returns the largest wall_impact physics_step ever reported. */
+static float max_impact_driving(const Level *lv, float vx0, float secs)
+{
+    Ball b;
+    float dt = 1.0f / 60.0f, best = 0.0f;
+    int steps = (int)(secs / dt + 0.5f), i;
+    physics_reset(&b, lv);
+    b.vx = vx0;
+    for (i = 0; i < steps; i++) {
+        float impact = -1.0f; /* poisoned: physics_step must always write it */
+        physics_step(&b, lv, 0.0f, 0.0f, dt, &impact);
+        CHECK(impact >= 0.0f);
+        if (impact > best)
+            best = impact;
+    }
+    return best;
 }
 
 int main(void)
@@ -92,26 +111,26 @@ int main(void)
     lv.start_y = cell_centre(6);
     physics_reset(&b, &lv);
     for (i = 0; i < 12; i++)
-        physics_step(&b, &lv, 1.0f, 0.0f, 1.0f / 60.0f);
+        physics_step(&b, &lv, 1.0f, 0.0f, 1.0f / 60.0f, NULL);
     CHECK(b.x > cell_centre(11) + 1.0f);
     CHECK(b.vx > 0.0f);
     CHECK(fabs(b.y - cell_centre(6)) < 0.001f);
 
     physics_reset(&b, &lv);
     for (i = 0; i < 12; i++)
-        physics_step(&b, &lv, -1.0f, 0.0f, 1.0f / 60.0f);
+        physics_step(&b, &lv, -1.0f, 0.0f, 1.0f / 60.0f, NULL);
     CHECK(b.x < cell_centre(11) - 1.0f);
     CHECK(b.vx < 0.0f);
 
     physics_reset(&b, &lv);
     for (i = 0; i < 12; i++)
-        physics_step(&b, &lv, 0.0f, 1.0f, 1.0f / 60.0f);
+        physics_step(&b, &lv, 0.0f, 1.0f, 1.0f / 60.0f, NULL);
     CHECK(b.y > cell_centre(6) + 1.0f);
     CHECK(b.vy > 0.0f);
 
     physics_reset(&b, &lv);
     for (i = 0; i < 12; i++)
-        physics_step(&b, &lv, 0.0f, -1.0f, 1.0f / 60.0f);
+        physics_step(&b, &lv, 0.0f, -1.0f, 1.0f / 60.0f, NULL);
     CHECK(b.y < cell_centre(6) - 1.0f);
     CHECK(b.vy < 0.0f);
 
@@ -121,8 +140,8 @@ int main(void)
         physics_reset(&a2, &lv);
         physics_reset(&b2, &lv);
         for (i = 0; i < 12; i++) {
-            physics_step(&a2, &lv, 1.0f, 0.0f, 1.0f / 60.0f);
-            physics_step(&b2, &lv, 5.0f, 0.0f, 1.0f / 60.0f);
+            physics_step(&a2, &lv, 1.0f, 0.0f, 1.0f / 60.0f, NULL);
+            physics_step(&b2, &lv, 5.0f, 0.0f, 1.0f / 60.0f, NULL);
         }
         CHECK(a2.x == b2.x && a2.vx == b2.vx);
     }
@@ -133,9 +152,9 @@ int main(void)
         physics_reset(&a60, &lv);
         physics_reset(&a30, &lv);
         for (i = 0; i < 30; i++)
-            physics_step(&a60, &lv, 1.0f, 0.0f, 1.0f / 60.0f);
+            physics_step(&a60, &lv, 1.0f, 0.0f, 1.0f / 60.0f, NULL);
         for (i = 0; i < 15; i++)
-            physics_step(&a30, &lv, 1.0f, 0.0f, 1.0f / 30.0f);
+            physics_step(&a30, &lv, 1.0f, 0.0f, 1.0f / 30.0f, NULL);
         CHECK(fabs(a60.x - a30.x) < 2.0f);
     }
 
@@ -143,19 +162,19 @@ int main(void)
     physics_reset(&b, &lv);
     b.vx = 300.0f;
     for (i = 0; i < 60 * 5; i++)
-        physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f);
+        physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f, NULL);
     CHECK(b.vx == 0.0f && b.vy == 0.0f);
 
     /* --- zero tilt at rest stays put for 5 s --- */
     physics_reset(&b, &lv);
     for (i = 0; i < 60 * 5; i++)
-        physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f);
+        physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f, NULL);
     CHECK(fabs(b.x - cell_centre(11)) < 0.01f && fabs(b.y - cell_centre(6)) < 0.01f);
 
     /* --- speed clamp --- */
     physics_reset(&b, &lv);
     b.vx = 5000.0f;
-    physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f);
+    physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f, NULL);
     CHECK(sqrt(b.vx * b.vx + b.vy * b.vy) <= 700.5f);
 
     /* --- walls: max speed into the border, dt 1/60 and 0.1 --- */
@@ -200,7 +219,7 @@ int main(void)
     {
         float minvx = 0.0f;
         for (i = 0; i < 60; i++) {
-            physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f);
+            physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f, NULL);
             if (b.vx < minvx)
                 minvx = b.vx;
         }
@@ -232,7 +251,7 @@ int main(void)
     {
         PhysResult r = PHYS_ROLLING;
         for (i = 0; i < 60 * 5 && b.x < cell_centre(8) + 60.0f; i++) {
-            r = physics_step(&b, &lv, 1.0f, 0.0f, 1.0f / 60.0f);
+            r = physics_step(&b, &lv, 1.0f, 0.0f, 1.0f / 60.0f, NULL);
             if (r != PHYS_ROLLING)
                 break;
         }
@@ -246,10 +265,47 @@ int main(void)
 
     /* Degenerate input. */
     physics_reset(&b, &lv);
-    CHECK(physics_step(&b, &lv, 1.0f, 1.0f, 0.0f) == PHYS_ROLLING);
-    CHECK(physics_step(&b, &lv, 1.0f, 1.0f, -1.0f) == PHYS_ROLLING);
+    CHECK(physics_step(&b, &lv, 1.0f, 1.0f, 0.0f, NULL) == PHYS_ROLLING);
+    CHECK(physics_step(&b, &lv, 1.0f, 1.0f, -1.0f, NULL) == PHYS_ROLLING);
     CHECK(b.x == lv.start_x && b.y == lv.start_y);
-    CHECK(physics_step(NULL, &lv, 1.0f, 1.0f, 0.1f) == PHYS_ROLLING);
+    CHECK(physics_step(NULL, &lv, 1.0f, 1.0f, 0.1f, NULL) == PHYS_ROLLING);
+
+    /* --- wall_impact --- */
+    make_box(&lv);
+    lv.start_x = cell_centre(11);
+    lv.start_y = cell_centre(6);
+
+    /* Free rolling on open floor, far from any wall: impact reports 0. */
+    physics_reset(&b, &lv);
+    b.vx = 200.0f;
+    {
+        float impact = -1.0f;
+        for (i = 0; i < 30; i++)
+            physics_step(&b, &lv, 0.0f, 0.0f, 1.0f / 60.0f, &impact);
+        CHECK(impact == 0.0f);
+    }
+
+    /* NULL is accepted, including on a step that strikes a wall. */
+    physics_reset(&b, &lv);
+    b.vx = 700.0f;
+    for (i = 0; i < 60 * 3; i++)
+        physics_step(&b, &lv, 1.0f, 0.0f, 1.0f / 60.0f, NULL);
+
+    /* Driven into the border wall, impact goes positive on the contact step; a faster
+     * approach gives a larger impact. Start close enough to the wall (cell 20 of 23)
+     * that even the slow approach's friction-limited coasting distance reaches it. */
+    {
+        Level implv;
+        float impact_slow, impact_fast;
+        make_box(&implv);
+        implv.start_x = cell_centre(20);
+        implv.start_y = cell_centre(6);
+        impact_slow = max_impact_driving(&implv, 300.0f, 3.0f);
+        impact_fast = max_impact_driving(&implv, 700.0f, 3.0f);
+        CHECK(impact_slow > 0.0f);
+        CHECK(impact_fast > 0.0f);
+        CHECK(impact_fast > impact_slow);
+    }
 
     return test_summary("physics");
 }

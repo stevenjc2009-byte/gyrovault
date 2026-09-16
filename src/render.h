@@ -31,9 +31,23 @@ void  render_text_centered(float cx, float y, unsigned int color, float scale, c
 float render_text_width(float scale, const char *s);
 
 /* Game board */
+/* Pre-render the level's STATIC parts (floor, walls, holes) into an offscreen
+ * texture; call once when a vault loads. 0 on success. If this hasn't been
+ * called, or it failed, for the level currently being drawn, render_board()
+ * falls back to drawing everything live. */
+int  render_board_cache(const Level *lv);
 void render_board(const Level *lv, float time_s);
 void render_ball(const Ball *b, float scale);   /* scale < 1 = sinking into a hole */
-void render_hud(const Level *lv, int level_index);
+void render_hud(const Level *lv, int level_index, const char *time_text); /* time_text NULL = no timer */
+
+/* Round bubble-level indicator centred at (cx, cy) with outer radius `radius`.
+ * tilt_x/tilt_y are the same [-1,1] tilt values passed to physics_step(). */
+void render_tilt_gauge(float cx, float cy, float radius, float tilt_x, float tilt_y);
+
+/* Full-screen white flash for level completion. t is seconds since the flash
+ * started; draws nothing outside [0, RENDER_FLASH_DURATION). */
+#define RENDER_FLASH_DURATION 0.6f
+void render_flash(float t);
 
 /* Small check mark icon, top-left at (x, y), size s. */
 void render_check(float x, float y, float s, unsigned int color);

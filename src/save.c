@@ -5,7 +5,8 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#define SAVE_FORMAT_VERSION    2
+#define SAVE_FORMAT_VERSION    3
+#define SAVE_FORMAT_VERSION_V2 2
 #define SAVE_FORMAT_VERSION_V1 1
 
 static uint32_t crc32_ieee(const uint8_t *p, size_t n)
@@ -22,10 +23,13 @@ static uint32_t crc32_ieee(const uint8_t *p, size_t n)
 
 void save_defaults(SaveData *s)
 {
+    int i;
     if (!s)
         return;
     s->unlocked = 1;
     s->completed_mask = 0;
+    for (i = 0; i < LEVEL_COUNT; i++)
+        s->best_cs[i] = SAVE_NO_TIME;
 }
 
 void save_mark_complete(SaveData *s, int index)
@@ -40,6 +44,17 @@ void save_mark_complete(SaveData *s, int index)
         unlock = LEVEL_COUNT;
     if (s->unlocked < unlock)
         s->unlocked = (uint8_t)unlock;
+}
+
+int save_record_time(SaveData *s, int index, uint32_t cs)
+{
+    if (!s || index < 0 || index >= LEVEL_COUNT || cs == SAVE_NO_TIME)
+        return 0;
+    if (s->best_cs[index] == SAVE_NO_TIME || cs < s->best_cs[index]) {
+        s->best_cs[index] = cs;
+        return 1;
+    }
+    return 0;
 }
 
 int save_level_open(const SaveData *s, int index)
@@ -61,6 +76,7 @@ static uint32_t save_valid_mask(void)
 size_t save_serialize(const SaveData *s, uint8_t *buf, size_t cap)
 {
     uint32_t crc;
+    int i;
     if (!s || !buf || cap < SAVE_BLOB_SIZE)
         return 0;
     memset(buf, 0, SAVE_BLOB_SIZE);
@@ -73,11 +89,19 @@ size_t save_serialize(const SaveData *s, uint8_t *buf, size_t cap)
     buf[9]  = (uint8_t)((s->completed_mask >> 8) & 0xFF);
     buf[10] = (uint8_t)((s->completed_mask >> 16) & 0xFF);
     buf[11] = (uint8_t)((s->completed_mask >> 24) & 0xFF);
-    crc = crc32_ieee(buf, 12);
-    buf[12] = (uint8_t)(crc & 0xFF);
-    buf[13] = (uint8_t)((crc >> 8) & 0xFF);
-    buf[14] = (uint8_t)((crc >> 16) & 0xFF);
-    buf[15] = (uint8_t)((crc >> 24) & 0xFF);
+    for (i = 0; i < LEVEL_COUNT; i++) {
+        uint32_t v = s->best_cs[i];
+        size_t off = 12 + (size_t)i * 4;
+        buf[off]     = (uint8_t)(v & 0xFF);
+        buf[off + 1] = (uint8_t)((v >> 8) & 0xFF);
+        buf[off + 2] = (uint8_t)((v >> 16) & 0xFF);
+        buf[off + 3] = (uint8_t)((v >> 24) & 0xFF);
+    }
+    crc = crc32_ieee(buf, 12 + (size_t)LEVEL_COUNT * 4);
+    buf[92] = (uint8_t)(crc & 0xFF);
+    buf[93] = (uint8_t)((crc >> 8) & 0xFF);
+    buf[94] = (uint8_t)((crc >> 16) & 0xFF);
+    buf[95] = (uint8_t)((crc >> 24) & 0xFF);
     return SAVE_BLOB_SIZE;
 }
 
@@ -89,23 +113,27 @@ int save_deserialize(SaveData *s, const uint8_t *buf, size_t len)
     if (!s)
         return -1;
     save_defaults(s);
-    if (!buf || len < SAVE_BLOB_SIZE)
+    if (!buf || len < SAVE_BLOB_SIZE_V2)
         return -1;
     if (memcmp(buf, "GYRV", 4) != 0)
         return -1;
     version = (unsigned)buf[4] | ((unsigned)buf[5] << 8);
-    stored = (uint32_t)buf[12] | ((uint32_t)buf[13] << 8) |
-             ((uint32_t)buf[14] << 16) | ((uint32_t)buf[15] << 24);
-    crc = crc32_ieee(buf, 12);
-    if (crc != stored)
-        return -1;
 
     if (version == SAVE_FORMAT_VERSION) {
-        uint8_t unlocked = buf[6];
+        uint8_t unlocked;
         uint32_t mask;
+        int i;
 
+        if (len != SAVE_BLOB_SIZE)
+            return -1;
+        stored = (uint32_t)buf[92] | ((uint32_t)buf[93] << 8) |
+                 ((uint32_t)buf[94] << 16) | ((uint32_t)buf[95] << 24);
+        crc = crc32_ieee(buf, 12 + (size_t)LEVEL_COUNT * 4);
+        if (crc != stored)
+            return -1;
         if (buf[7] != 0) /* reserved must be zero */
             return -1;
+        unlocked = buf[6];
         if (unlocked < 1 || unlocked > LEVEL_COUNT)
             return -1;
         mask = (uint32_t)buf[8] | ((uint32_t)buf[9] << 8) |
@@ -114,13 +142,54 @@ int save_deserialize(SaveData *s, const uint8_t *buf, size_t len)
             return -1;
         s->unlocked = unlocked;
         s->completed_mask = mask;
+        for (i = 0; i < LEVEL_COUNT; i++) {
+            size_t off = 12 + (size_t)i * 4;
+            s->best_cs[i] = (uint32_t)buf[off] | ((uint32_t)buf[off + 1] << 8) |
+                             ((uint32_t)buf[off + 2] << 16) | ((uint32_t)buf[off + 3] << 24);
+        }
+        return 0;
+    }
+
+    if (version == SAVE_FORMAT_VERSION_V2) {
+        uint8_t unlocked;
+        uint32_t mask;
+
+        if (len != SAVE_BLOB_SIZE_V2)
+            return -1;
+        stored = (uint32_t)buf[12] | ((uint32_t)buf[13] << 8) |
+                 ((uint32_t)buf[14] << 16) | ((uint32_t)buf[15] << 24);
+        crc = crc32_ieee(buf, 12);
+        if (crc != stored)
+            return -1;
+        if (buf[7] != 0) /* reserved must be zero */
+            return -1;
+        unlocked = buf[6];
+        if (unlocked < 1 || unlocked > LEVEL_COUNT)
+            return -1;
+        mask = (uint32_t)buf[8] | ((uint32_t)buf[9] << 8) |
+               ((uint32_t)buf[10] << 16) | ((uint32_t)buf[11] << 24);
+        if (mask & ~save_valid_mask())
+            return -1;
+        s->unlocked = unlocked;
+        s->completed_mask = mask;
+        /* best_cs already SAVE_NO_TIME from save_defaults above */
         return 0;
     }
 
     if (version == SAVE_FORMAT_VERSION_V1) {
-        uint8_t unlocked = buf[6];
-        uint8_t mask = buf[7];
+        uint8_t unlocked;
+        uint8_t mask;
         uint32_t new_mask;
+
+        if (len != SAVE_BLOB_SIZE_V2)
+            return -1;
+        stored = (uint32_t)buf[12] | ((uint32_t)buf[13] << 8) |
+                 ((uint32_t)buf[14] << 16) | ((uint32_t)buf[15] << 24);
+        crc = crc32_ieee(buf, 12);
+        if (crc != stored)
+            return -1;
+        unlocked = buf[6];
+        mask = buf[7];
 
         /* v1's trailing word [8..11] was always zero; nonzero here is corruption. */
         if (buf[8] != 0 || buf[9] != 0 || buf[10] != 0 || buf[11] != 0)
@@ -147,9 +216,13 @@ int save_deserialize(SaveData *s, const uint8_t *buf, size_t len)
     return -1; /* unknown version */
 }
 
+/* Read cap: bigger than any real blob (SAVE_BLOB_SIZE = 96) so a valid v1/v2/v3
+ * file always reads in full, while still bounding an oversized/corrupt file. */
+#define SAVE_LOAD_READ_CAP 128
+
 int save_load(SaveData *s, const char *path)
 {
-    uint8_t buf[SAVE_BLOB_SIZE + 1];
+    uint8_t buf[SAVE_LOAD_READ_CAP];
     size_t n;
     FILE *f;
 
@@ -163,8 +236,6 @@ int save_load(SaveData *s, const char *path)
         return -1;
     n = fread(buf, 1, sizeof(buf), f);
     fclose(f);
-    if (n != SAVE_BLOB_SIZE) /* short or oversized file = corrupt */
-        return -1;
     return save_deserialize(s, buf, n);
 }
 

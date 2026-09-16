@@ -1,4 +1,5 @@
-/* Scene state machine: menu, level select, play (hold/run/fell/pause/cleared), updates. */
+/* Scene state machine: menu, level select, play (hold/recal/run/fell/pause/cleared), updates. */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <psp2/ctrl.h>
@@ -10,11 +11,15 @@
 #include "physics.h"
 #include "render.h"
 #include "save.h"
+#include "sound.h"
+#include "timer.h"
 #include "updater.h"
 #include "version.h"
 
 #define HOLD_SECONDS  1.0f
 #define FELL_SECONDS  0.8f
+#define WALL_HIT_MIN_SPEED 30.0f   /* px/s below which a wall touch stays silent */
+#define WALL_HIT_COOLDOWN  0.06f   /* min seconds between wall-hit sounds */
 
 #define COL_TEXT   RGBA8(230, 234, 240, 255)
 #define COL_DIM    RGBA8(140, 146, 156, 255)
@@ -25,7 +30,7 @@
 #define SELECT_COLS 5  /* level-select grid columns */
 
 typedef enum { SCENE_MENU, SCENE_SELECT, SCENE_PLAY, SCENE_UPDATES } Scene;
-typedef enum { PLAY_HOLD, PLAY_RUN, PLAY_FELL, PLAY_PAUSED, PLAY_CLEARED } PlayState;
+typedef enum { PLAY_HOLD, PLAY_RECAL, PLAY_RUN, PLAY_FELL, PLAY_PAUSED, PLAY_CLEARED } PlayState;
 
 static Scene     scene = SCENE_MENU;
 static PlayState play_state = PLAY_HOLD;
@@ -34,11 +39,32 @@ static Level     levels[LEVEL_COUNT];
 static int       level_ok[LEVEL_COUNT];
 static Ball      ball;
 static int       cur_level = 0;
-static int       menu_sel = 0, select_sel = 0, pause_sel = 0;
+static int       menu_sel = 0, select_sel = 0, pause_sel = 0, cleared_sel = 0;
 static float     state_timer = 0.0f, clock_s = 0.0f;
 static int       save_failed = 0;
 static int       updater_started = 0;
 static unsigned  buttons_prev = 0, pressed = 0;
+
+/* Level to render_board_cache() outside the next render_begin/render_end, or -1 for none. */
+static int       pending_cache_index = -1;
+
+/* Session-only: once the player has done a flat ("place on a table") recalibration,
+ * vault-start no longer auto-recalibrates. Not saved. */
+static int       calibrated_flat_this_session = 0;
+
+/* Per-vault elapsed play time; only advances during PLAY_RUN. */
+static float     play_time_s = 0.0f;
+
+/* Wall-hit sound rate limit. */
+static float     wall_sound_cd = 0.0f;
+
+/* Result of the vault just cleared, captured on PHYS_GOAL for the completion screen. */
+static uint32_t  cleared_time_cs = TIMER_NONE;
+static uint32_t  best_time_cs = TIMER_NONE;
+static int       cleared_new_best = 0;
+
+/* Set on the completion screen's Quit; game_frame() returns it so main.c can exit. */
+static int       quit_requested = 0;
 
 /* ---------- input ---------- */
 
@@ -101,7 +127,14 @@ static void enter_level(int index)
     physics_reset(&ball, &levels[index]);
     play_state = PLAY_HOLD;
     state_timer = 0.0f;
+    play_time_s = 0.0f;
+    wall_sound_cd = 0.0f;
     save_failed = 0;
+    /* Once a flat recalibration has happened this session, vault-start no longer
+     * recalibrates, so there is nothing to average. */
+    if (!calibrated_flat_this_session)
+        motion_calibrate_begin();
+    pending_cache_index = index; /* cached outside render_begin/render_end, see game_frame() */
     scene = SCENE_PLAY;
 }
 
@@ -124,9 +157,9 @@ static void scene_menu(void)
     if (hit(SCE_CTRL_UP))   menu_sel = (menu_sel + n - 1) % n;
     if (hit(SCE_CTRL_DOWN)) menu_sel = (menu_sel + 1) % n;
     if (hit(SCE_CTRL_CROSS)) {
-        if (menu_sel == 0) {
+        if (menu_sel == 0 && level_ok[unlocked_count() - 1]) {
             enter_level(unlocked_count() - 1);
-        } else if (menu_sel == 1) {
+        } else if (menu_sel <= 1) { /* Level Select, or Play when that vault is Unavailable */
             select_sel = unlocked_count() - 1;
             scene = SCENE_SELECT;
         } else {
@@ -170,7 +203,8 @@ static void scene_select(void)
     for (int i = 0; i < LEVEL_COUNT; i++) {
         int col = i % SELECT_COLS, row = i / SELECT_COLS;
         float x = grid_x0 + col * (cw + col_gap), y = grid_top + row * (ch + row_gap);
-        int locked = !save_level_open(&save, i) || !level_ok[i];
+        int failed = !level_ok[i];
+        int locked = failed || !save_level_open(&save, i);
         render_panel(x, y, cw, ch, i == select_sel, locked);
 
         char title[32];
@@ -178,7 +212,9 @@ static void scene_select(void)
         render_text_centered(x + cw * 0.5f, y + 10, locked ? COL_GREY : COL_TEXT, TEXT_NORMAL, title);
 
         float sy = y + ch - 28;
-        if (locked) {
+        if (failed) {
+            render_text_centered(x + cw * 0.5f, sy, COL_RED, TEXT_SMALL, "Unavailable");
+        } else if (locked) {
             render_text_centered(x + cw * 0.5f, sy, COL_RED, TEXT_SMALL, "Locked");
         } else if (level_done(i)) {
             float tw = render_text_width(TEXT_SMALL, "Cleared");
@@ -187,37 +223,81 @@ static void scene_select(void)
         }
     }
 
-    int sel_locked = !save_level_open(&save, select_sel) || !level_ok[select_sel];
+    int sel_unavailable = !level_ok[select_sel];
+    int sel_locked = !sel_unavailable && !save_level_open(&save, select_sel);
     const char *name = level_ok[select_sel] && levels[select_sel].name ? levels[select_sel].name : "(unavailable)";
-    render_text_centered(SCREEN_W * 0.5f, 460, sel_locked ? COL_DIM : COL_TEXT, TEXT_NORMAL, name);
-    if (sel_locked)
+    render_text_centered(SCREEN_W * 0.5f, 460, (sel_unavailable || sel_locked) ? COL_DIM : COL_TEXT, TEXT_NORMAL, name);
+    if (sel_unavailable)
+        render_text_centered(SCREEN_W * 0.5f, 482, COL_RED, TEXT_SMALL, "This vault's data failed to load");
+    else if (sel_locked)
         render_text_centered(SCREEN_W * 0.5f, 482, COL_RED, TEXT_SMALL, "Clear the previous vault to unlock");
 
     render_text(12, SCREEN_H - 26, COL_DIM, TEXT_SMALL, "X: play   O: back");
 }
 
-static void draw_play_world(float ball_scale)
+static void draw_play_world(float ball_scale, const char *time_text)
 {
     render_board(&levels[cur_level], clock_s);
     render_ball(&ball, ball_scale);
-    render_hud(&levels[cur_level], cur_level);
+    render_hud(&levels[cur_level], cur_level, time_text);
+}
+
+/* HUD timer text: only shown while a run is live (rolling, mid-fall animation, or
+ * paused mid-run); NULL (no timer) during hold/recalibrate/cleared overlays. */
+static const char *hud_time_text(char *buf, size_t cap)
+{
+    switch (play_state) {
+    case PLAY_RUN:
+    case PLAY_FELL:
+    case PLAY_PAUSED:
+        timer_format(timer_to_cs(play_time_s), buf, cap);
+        return buf;
+    default:
+        return NULL;
+    }
 }
 
 static void scene_play(float dt)
 {
     const Level *lv = &levels[cur_level];
     float tx = 0.0f, ty = 0.0f;
+    char time_buf[16];
 
     switch (play_state) {
     case PLAY_HOLD:
         state_timer += dt;
-        draw_play_world(1.0f);
+        if (!calibrated_flat_this_session)
+            motion_calibrate_sample();
+        motion_read(&tx, &ty);
+        draw_play_world(1.0f, NULL);
         render_dim(120);
-        render_panel(280, 210, 400, 100, 0, 0);
-        render_text_centered(SCREEN_W * 0.5f, 240, COL_TEXT, TEXT_BIG * 0.8f, "Hold your Vita level");
+        render_panel(280, 190, 400, 170, 0, 0);
+        render_text_centered(SCREEN_W * 0.5f, 215, COL_TEXT, TEXT_BIG * 0.8f, "Hold your Vita level");
+        render_tilt_gauge(SCREEN_W * 0.5f, 305, 38, tx, ty);
         if (state_timer >= HOLD_SECONDS) {
-            motion_calibrate();
+            if (!calibrated_flat_this_session)
+                motion_calibrate_end();
             play_state = PLAY_RUN;
+        }
+        break;
+
+    case PLAY_RECAL:
+        motion_calibrate_sample();
+        motion_read_flat(&tx, &ty);
+        draw_play_world(1.0f, NULL);
+        render_dim(120);
+        render_panel(230, 170, 500, 210, 0, 0);
+        render_text_centered(SCREEN_W * 0.5f, 205, COL_TEXT, TEXT_BIG * 0.7f, "Place your PS Vita on a flat surface");
+        render_text_centered(SCREEN_W * 0.5f, 240, COL_DIM, TEXT_NORMAL, "Press X");
+        render_tilt_gauge(SCREEN_W * 0.5f, 320, 42, tx, ty);
+        if (hit(SCE_CTRL_CROSS)) {
+            motion_calibrate_end(); /* 0 samples safely keeps the previous neutral */
+            calibrated_flat_this_session = 1;
+            physics_reset(&ball, lv);
+            play_time_s = 0.0f;
+            play_state = PLAY_RUN;
+        } else if (hit(SCE_CTRL_CIRCLE)) {
+            play_state = PLAY_PAUSED; /* back out without touching calibration */
         }
         break;
 
@@ -225,21 +305,41 @@ static void scene_play(float dt)
         if (hit(SCE_CTRL_START)) {
             play_state = PLAY_PAUSED;
             pause_sel = 0;
-            draw_play_world(1.0f);
+            draw_play_world(1.0f, hud_time_text(time_buf, sizeof time_buf));
             break;
         }
+        play_time_s += dt;
         motion_read(&tx, &ty);
-        PhysResult r = physics_step(&ball, lv, tx, ty, dt);
+        float wall_impact = 0.0f;
+        PhysResult r = physics_step(&ball, lv, tx, ty, dt, &wall_impact);
+        sound_set_rolling(hypotf(ball.vx, ball.vy));
+
+        wall_sound_cd -= dt;
+        if (wall_impact > WALL_HIT_MIN_SPEED && wall_sound_cd <= 0.0f) {
+            float inten = wall_impact / BALL_MAX_SPEED;
+            if (inten > 1.0f) inten = 1.0f;
+            if (inten < 0.0f) inten = 0.0f;
+            sound_play(SND_WALL_HIT, inten);
+            wall_sound_cd = WALL_HIT_COOLDOWN;
+        }
+
         if (r == PHYS_FELL) {
+            sound_play(SND_FELL, 1.0f);
             play_state = PLAY_FELL;
             state_timer = 0.0f;
+            play_time_s = 0.0f;
         } else if (r == PHYS_GOAL) {
+            sound_play(SND_GOAL, 1.0f);
+            cleared_time_cs = timer_to_cs(play_time_s);
             save_mark_complete(&save, cur_level);
+            cleared_new_best = save_record_time(&save, cur_level, cleared_time_cs);
+            best_time_cs = save.best_cs[cur_level];
             save_failed = save_write(&save, SAVE_DIR, SAVE_PATH) != 0;
             play_state = PLAY_CLEARED;
             state_timer = 0.0f;
+            cleared_sel = 0;
         }
-        draw_play_world(1.0f);
+        draw_play_world(1.0f, hud_time_text(time_buf, sizeof time_buf));
         break;
     }
 
@@ -247,7 +347,7 @@ static void scene_play(float dt)
         state_timer += dt;
         {
             float k = 1.0f - state_timer / (FELL_SECONDS * 0.5f);
-            draw_play_world(k < 0 ? 0 : k);
+            draw_play_world(k < 0 ? 0 : k, hud_time_text(time_buf, sizeof time_buf));
         }
         if (((int)(state_timer * 8)) % 2 == 0)
             render_dim(70);
@@ -266,12 +366,15 @@ static void scene_play(float dt)
         int resume = hit(SCE_CTRL_START) || hit(SCE_CTRL_CIRCLE);
         if (hit(SCE_CTRL_CROSS)) {
             if (pause_sel == 0) resume = 1;
-            else if (pause_sel == 1) { play_state = PLAY_HOLD; state_timer = 0.0f; }
+            else if (pause_sel == 1) {
+                motion_calibrate_begin();
+                play_state = PLAY_RECAL;
+            }
             else scene = SCENE_MENU;
         }
         if (resume)
             play_state = PLAY_RUN;
-        draw_play_world(1.0f);
+        draw_play_world(1.0f, hud_time_text(time_buf, sizeof time_buf));
         render_dim(150);
         render_text_centered(SCREEN_W * 0.5f, 110, COL_TEXT, TEXT_BIG, "Paused");
         draw_menu_list(items, 3, pause_sel, 190);
@@ -280,28 +383,62 @@ static void scene_play(float dt)
 
     case PLAY_CLEARED: {
         int last = cur_level >= LEVEL_COUNT - 1;
+        int can_next = !last && level_ok[cur_level + 1];
+        static const char *const items_next[]   = { "Next Level", "Level Select", "Quit" };
+        static const char *const items_nonext[] = { "Level Select", "Quit" };
+        const char *const *items = can_next ? items_next : items_nonext;
+        int n = can_next ? 3 : 2;
+
         state_timer += dt;
+        if (hit(SCE_CTRL_UP))   cleared_sel = (cleared_sel + n - 1) % n;
+        if (hit(SCE_CTRL_DOWN)) cleared_sel = (cleared_sel + 1) % n;
         if (hit(SCE_CTRL_CROSS)) {
-            if (last || !level_ok[cur_level + 1]) scene = SCENE_MENU;
-            else enter_level(cur_level + 1);
-        } else if (hit(SCE_CTRL_CIRCLE)) {
-            scene = SCENE_MENU;
+            if (can_next && cleared_sel == 0) {
+                enter_level(cur_level + 1);
+            } else if ((can_next && cleared_sel == 1) || (!can_next && cleared_sel == 0)) {
+                select_sel = cur_level;
+                scene = SCENE_SELECT;
+            } else {
+                quit_requested = 1;
+            }
         }
         if (scene != SCENE_PLAY || play_state != PLAY_CLEARED) {
             /* left this state this frame; draw the destination next frame */
             render_steel_background();
             break;
         }
-        draw_play_world(0.6f);
+
+        draw_play_world(0.6f, NULL);
+        render_flash(state_timer);
         render_dim(160);
-        render_panel(230, 150, 500, 250, 0, 0);
-        render_text_centered(SCREEN_W * 0.5f, 180, COL_GREEN, TEXT_BIG * 1.2f,
+        render_panel(180, 30, 600, 480, 0, 0);
+
+        render_text_centered(SCREEN_W * 0.5f, 55, COL_GREEN, TEXT_BIG * 1.1f,
                              last ? "All vaults cleared!" : "Vault cleared!");
-        render_check(SCREEN_W * 0.5f - 24, 250, 48, COL_GREEN);
-        render_text_centered(SCREEN_W * 0.5f, 330, COL_TEXT, TEXT_NORMAL,
-                             last ? "X: menu   O: menu" : "X: next vault   O: menu");
-        if (save_failed)
-            render_text_centered(SCREEN_W * 0.5f, 365, COL_RED, TEXT_SMALL, "Warning: progress could not be saved");
+        render_check(SCREEN_W * 0.5f - 20, 95, 40, COL_GREEN);
+
+        const char *vname = levels[cur_level].name ? levels[cur_level].name : "";
+        render_text_centered(SCREEN_W * 0.5f, 155, COL_TEXT, TEXT_NORMAL, vname);
+
+        char tbuf[16], bbuf[16], line[48];
+        timer_format(cleared_time_cs, tbuf, sizeof tbuf);
+        timer_format(best_time_cs, bbuf, sizeof bbuf);
+        float y = 190;
+        snprintf(line, sizeof line, "Time: %s", tbuf);
+        render_text_centered(SCREEN_W * 0.5f, y, COL_TEXT, TEXT_NORMAL, line);
+        y += 27;
+        snprintf(line, sizeof line, "Best: %s", bbuf);
+        render_text_centered(SCREEN_W * 0.5f, y, COL_TEXT, TEXT_NORMAL, line);
+        y += 27;
+        if (cleared_new_best) {
+            render_text_centered(SCREEN_W * 0.5f, y, COL_GREEN, TEXT_SMALL, "New best!");
+            y += 24;
+        }
+        if (save_failed) {
+            render_text_centered(SCREEN_W * 0.5f, y, COL_RED, TEXT_SMALL, "Warning: progress could not be saved");
+            y += 24;
+        }
+        draw_menu_list(items, n, cleared_sel, y + 15);
         break;
     }
     }
@@ -411,6 +548,12 @@ int game_frame(float dt)
 {
     clock_s += dt;
     poll_input();
+    sound_set_rolling(0.0f); /* PLAY_RUN below overrides this when actually rolling */
+
+    if (pending_cache_index >= 0) {
+        render_board_cache(&levels[pending_cache_index]); /* outside render_begin/render_end */
+        pending_cache_index = -1;
+    }
 
     render_begin();
     switch (scene) {
@@ -420,7 +563,7 @@ int game_frame(float dt)
     case SCENE_UPDATES: scene_updates(); break;
     }
     render_end();
-    return 0;
+    return quit_requested;
 }
 
 void game_shutdown(void)

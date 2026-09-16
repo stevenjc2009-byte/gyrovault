@@ -79,7 +79,7 @@ static PhysResult simulate(const Level *lv, float x, float y, int dir, int on_fr
         PhysResult r;
         filt += FILTER_ALPHA * (target - filt);
         t = dead_zone(filt);
-        r = physics_step(&b, lv, t * (float)DIRX[dir], t * (float)DIRY[dir], DT);
+        r = physics_step(&b, lv, t * (float)DIRX[dir], t * (float)DIRY[dir], DT, NULL);
         if (r != PHYS_ROLLING)
             return r;
         if (f >= on_frames && t == 0.0f && b.vx == 0.0f && b.vy == 0.0f)

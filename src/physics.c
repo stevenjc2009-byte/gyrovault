@@ -5,7 +5,7 @@
 #define ACCEL_PX_S2      1100.0f /* full tilt */
 #define FRICTION_PX_S2   90.0f   /* constant rolling friction: lets a coasting ball stop */
 #define DAMPING_PER_S    0.35f   /* proportional drag on top of friction */
-#define MAX_SPEED_PX_S   700.0f
+#define MAX_SPEED_PX_S   BALL_MAX_SPEED
 #define RESTITUTION      0.3f
 #define CAPTURE_R_PX     13.0f   /* centre within this of a hole/goal centre = captured */
 #define MAX_DT_S         0.25f   /* longer hitches are simulated as 0.25 s */
@@ -34,8 +34,9 @@ void physics_reset(Ball *b, const Level *lv)
 }
 
 /* Push the ball out of every wall cell in the 3x3 neighbourhood and bounce the normal
- * velocity component. Two passes settle concave corners. */
-static void collide_walls(Ball *b, const Level *lv)
+ * velocity component. Two passes settle concave corners. *impact (if non-NULL) is raised
+ * to the largest inbound normal speed removed by any collision found here. */
+static void collide_walls(Ball *b, const Level *lv, float *impact)
 {
     int pass, dx, dy;
     const float r = BALL_RADIUS;
@@ -82,6 +83,8 @@ static void collide_walls(Ball *b, const Level *lv)
                 b->y += ny * pen;
                 vn = b->vx * nx + b->vy * ny;
                 if (vn < 0.0f) {
+                    if (impact && -vn > *impact)
+                        *impact = -vn;
                     b->vx -= (1.0f + RESTITUTION) * vn * nx;
                     b->vy -= (1.0f + RESTITUTION) * vn * ny;
                 }
@@ -106,11 +109,14 @@ static PhysResult check_capture(const Ball *b, const Level *lv)
     return c == CELL_HOLE ? PHYS_FELL : PHYS_GOAL;
 }
 
-PhysResult physics_step(Ball *b, const Level *lv, float tilt_x, float tilt_y, float dt)
+PhysResult physics_step(Ball *b, const Level *lv, float tilt_x, float tilt_y, float dt,
+                         float *wall_impact)
 {
     int n, i;
     float h, ax, ay;
 
+    if (wall_impact)
+        *wall_impact = 0.0f;
     if (!b || !lv || !(dt > 0.0f))
         return PHYS_ROLLING;
     if (dt > MAX_DT_S)
@@ -152,7 +158,7 @@ PhysResult physics_step(Ball *b, const Level *lv, float tilt_x, float tilt_y, fl
         b->x += b->vx * h;
         b->y += b->vy * h;
 
-        collide_walls(b, lv);
+        collide_walls(b, lv, wall_impact);
 
         res = check_capture(b, lv);
         if (res != PHYS_ROLLING)
