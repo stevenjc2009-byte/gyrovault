@@ -3,10 +3,12 @@ CC      = gcc
 CFLAGS  = -I../src -Wall -Wextra -Werror -O1
 LDLIBS  = -lm
 
+# solve_core.c is a test-side helper, not game code; it links into every suite so the
+# pattern rule below stays a one-liner. Only test_solvable calls it.
 CORE    = ../src/level.c ../src/physics.c ../src/save.c ../src/version.c \
           $(wildcard ../src/motion_map.c) $(wildcard ../src/sound_synth.c) \
-          $(wildcard ../src/timer.c)
-HEADERS = $(wildcard ../src/*.h) test.h
+          $(wildcard ../src/timer.c) solve_core.c
+HEADERS = $(wildcard ../src/*.h) test.h solve_core.h
 TESTS   = $(sort $(wildcard test_*.c))
 SUITES  = $(TESTS:.c=)
 BINS    = $(addprefix build/,$(SUITES))

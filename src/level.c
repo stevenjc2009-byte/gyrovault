@@ -1,8 +1,10 @@
 #include "level.h"
 
+#include <math.h>
 #include <string.h>
 
-/* Legend: '#' wall, '.' floor, 'O' hole, 'G' goal (exactly one), 'S' start (exactly one, floor). */
+/* Legend: '#' wall, '.' floor, 'O' hole, 'G' goal (exactly one), 'S' start (exactly one, floor),
+ * 'a'/'A'..'d'/'D' the two ends of a hazard's patrol (floor; see Hazard in level.h). */
 
 static const char *const LEVEL_NAMES[LEVEL_COUNT] = {
     "The First Vault",
@@ -351,20 +353,23 @@ static const char *const LEVEL_MAPS[LEVEL_COUNT][LEVEL_H] = {
     },
 };
 
-int level_load(int index, Level *out)
+int level_parse(const char *const *rows, const char *name, Level *out)
 {
     Level tmp;
     int starts = 0, goals = 0;
-    int x, y;
+    int x, y, h;
+    /* Patrol ends as they are found: [h][0] is the lower-case end, [h][1] the capital. */
+    int hx[LEVEL_MAX_HAZARDS][2], hy[LEVEL_MAX_HAZARDS][2], hseen[LEVEL_MAX_HAZARDS][2];
 
-    if (!out || index < 0 || index >= LEVEL_COUNT)
+    if (!rows || !out)
         return -1;
+    memset(hseen, 0, sizeof(hseen));
 
     memset(&tmp, 0, sizeof(tmp));
-    tmp.name = LEVEL_NAMES[index];
+    tmp.name = name;
 
     for (y = 0; y < LEVEL_H; y++) {
-        const char *row = LEVEL_MAPS[index][y];
+        const char *row = rows[y];
         if (!row || strlen(row) != (size_t)LEVEL_W)
             return -1;
         for (x = 0; x < LEVEL_W; x++) {
@@ -380,7 +385,20 @@ int level_load(int index, Level *out)
                 tmp.start_x = (float)(x * CELL_PX + CELL_PX / 2);
                 tmp.start_y = (float)(y * CELL_PX + CELL_PX / 2);
                 break;
-            default: return -1;
+            default: {
+                char c = row[x];
+                int slot = c >= 'a' && c < 'a' + LEVEL_MAX_HAZARDS ? c - 'a'
+                         : c >= 'A' && c < 'A' + LEVEL_MAX_HAZARDS ? c - 'A'
+                         : -1;
+                int end = c >= 'a' ? 0 : 1;
+                if (slot < 0 || hseen[slot][end]) /* unknown char, or the end twice */
+                    return -1;
+                hseen[slot][end] = 1;
+                hx[slot][end] = x;
+                hy[slot][end] = y;
+                cell = CELL_FLOOR;
+                break;
+            }
             }
             if ((x == 0 || y == 0 || x == LEVEL_W - 1 || y == LEVEL_H - 1) && cell != CELL_WALL)
                 return -1;
@@ -391,8 +409,83 @@ int level_load(int index, Level *out)
     if (starts != 1 || goals != 1)
         return -1;
 
+    /* Hazard slots must be used in order and in pairs, and a patrol must be a straight
+     * unobstructed run: a hazard that could sit inside a wall is a level-design bug, and
+     * this is the only place it can be caught before the vault ships. */
+    for (h = 0; h < LEVEL_MAX_HAZARDS; h++) {
+        int lo, hi, k, along_x;
+        if (!hseen[h][0] && !hseen[h][1])
+            break;
+        if (!hseen[h][0] || !hseen[h][1])
+            return -1; /* one end without the other */
+        along_x = hy[h][0] == hy[h][1];
+        if (!along_x && hx[h][0] != hx[h][1])
+            return -1; /* diagonal patrol */
+        lo = along_x ? (hx[h][0] < hx[h][1] ? hx[h][0] : hx[h][1])
+                     : (hy[h][0] < hy[h][1] ? hy[h][0] : hy[h][1]);
+        hi = along_x ? (hx[h][0] < hx[h][1] ? hx[h][1] : hx[h][0])
+                     : (hy[h][0] < hy[h][1] ? hy[h][1] : hy[h][0]);
+        if (hi - lo < 1)
+            return -1; /* both ends in one cell: nothing to patrol */
+        for (k = lo; k <= hi; k++) {
+            unsigned char c = along_x ? tmp.cells[hy[h][0]][k] : tmp.cells[k][hx[h][0]];
+            if (c != CELL_FLOOR)
+                return -1; /* the patrol crosses a wall, hole or the goal */
+        }
+        tmp.hazards[h].x0 = (float)(hx[h][0] * CELL_PX + CELL_PX / 2);
+        tmp.hazards[h].y0 = (float)(hy[h][0] * CELL_PX + CELL_PX / 2);
+        tmp.hazards[h].x1 = (float)(hx[h][1] * CELL_PX + CELL_PX / 2);
+        tmp.hazards[h].y1 = (float)(hy[h][1] * CELL_PX + CELL_PX / 2);
+        tmp.hazards[h].length = (float)((hi - lo) * CELL_PX);
+        tmp.hazard_count = h + 1;
+    }
+    for (; h < LEVEL_MAX_HAZARDS; h++)
+        if (hseen[h][0] || hseen[h][1])
+            return -1; /* slot 'c' used with slot 'b' left empty */
+
     *out = tmp;
     return 0;
+}
+
+void level_hazard_pos(const Hazard *h, float t, float *out_x, float *out_y)
+{
+    float span, u, f;
+    if (!h || h->length <= 0.0f) {
+        if (out_x) *out_x = 0.0f;
+        if (out_y) *out_y = 0.0f;
+        return;
+    }
+    span = h->length * 2.0f;
+    u = fmodf(t * HAZARD_SPEED_PX, span);
+    if (u < 0.0f)
+        u += span;
+    f = (u <= h->length ? u : span - u) / h->length; /* triangle wave, 0 -> 1 -> 0 */
+    if (out_x) *out_x = h->x0 + (h->x1 - h->x0) * f;
+    if (out_y) *out_y = h->y0 + (h->y1 - h->y0) * f;
+}
+
+int level_hazard_hit(const Level *lv, float t, float bx, float by, float ball_r)
+{
+    int i;
+    float reach = ball_r + HAZARD_RADIUS_PX;
+    if (!lv)
+        return 0;
+    for (i = 0; i < lv->hazard_count; i++) {
+        float hxp, hyp, dx, dy;
+        level_hazard_pos(&lv->hazards[i], t, &hxp, &hyp);
+        dx = bx - hxp;
+        dy = by - hyp;
+        if (dx * dx + dy * dy < reach * reach)
+            return 1;
+    }
+    return 0;
+}
+
+int level_load(int index, Level *out)
+{
+    if (index < 0 || index >= LEVEL_COUNT)
+        return -1;
+    return level_parse(LEVEL_MAPS[index], LEVEL_NAMES[index], out);
 }
 
 CellType level_cell(const Level *lv, int cx, int cy)
