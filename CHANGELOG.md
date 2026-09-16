@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.2] - 2026-09-16
+
+### Fixed
+- **The built-in updater.** The certificate bundle shipped all 121 root authorities Mozilla trusts, and the Vita's OpenSSL never got through them. The diagnostic added in 2.0.1 reported `PEM unreadable 0x2006C041 malloc failure`, which decodes as `BIO_new` failing to allocate — every certificate and every BIO takes a lock object as it is parsed, and the console runs out long before certificate 121. Not one certificate reached the trust store, which is why every possible cause arrived as the same "error adding trust anchors" message in 1.0.0, 2.0.0 and 2.0.1. The bundle now carries the 8 roots the update path actually needs, copied unchanged from the same Mozilla set: ISRG Root X1 and X2, USERTrust ECC and RSA, Sectigo Public Server Authentication Root E46 and R46, and DigiCert Global Root G2 and G3. It went from 191,850 bytes to 11,998.
+
+### Changed
+- `assets/cacert.pem` is deliberately no longer the full Mozilla bundle. It verifies `github.com`, `api.github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com` and `codeload.github.com` — every host the updater contacts — and nothing else. If GitHub ever moves to an authority outside that set the updater will stop working and a VPK will have to be installed by hand, so each authority's sibling roots ship alongside the ones in use to leave room for a rotation.
+
 ## [2.0.1] - 2026-09-16
 
 ### Fixed
