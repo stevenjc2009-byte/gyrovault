@@ -7,6 +7,7 @@
  * which skips the ramp check. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "level.h"
 #include "physics.h" /* BALL_RADIUS, for the hazard-clearance check below */
@@ -50,6 +51,48 @@ static int mask_hazards(const Level *src, Level *out)
         }
     }
     return masked;
+}
+
+/* Flood fill from the start over cells the ball can come to rest on -- neither wall nor pit
+ * -- and return 1 as soon as it reaches a cell some patrol sweeps. `masked` is the output of
+ * mask_hazards, so a swept cell is one that is not wall in `lv` but is wall in `masked`.
+ *
+ * A patrol walled off from the start is scenery: it can never catch anything, so the vault
+ * ships as if it had no hazard at all. Four-connected and blind to momentum, which makes
+ * this a necessary condition only -- enough, because the failure it exists to catch is a
+ * patrol sealed in a room of its own. */
+static int hazards_reachable(const Level *lv, const Level *masked)
+{
+    static const int step_x[4] = { 1, -1, 0, 0 }, step_y[4] = { 0, 0, 1, -1 };
+    static unsigned char seen[LEVEL_H][LEVEL_W];
+    static short qx[LEVEL_H * LEVEL_W], qy[LEVEL_H * LEVEL_W];
+    int head = 0, tail = 0, x, y;
+
+    memset(seen, 0, sizeof seen);
+    x = (int)(lv->start_x / CELL_PX);
+    y = (int)(lv->start_y / CELL_PX);
+    seen[y][x] = 1;
+    qx[tail] = (short)x;
+    qy[tail] = (short)y;
+    tail++;
+    while (head < tail) {
+        int cx = qx[head], cy = qy[head], d;
+        head++;
+        if (lv->cells[cy][cx] != CELL_WALL && masked->cells[cy][cx] == CELL_WALL)
+            return 1;
+        for (d = 0; d < 4; d++) {
+            int nx = cx + step_x[d], ny = cy + step_y[d];
+            if (nx < 0 || ny < 0 || nx >= LEVEL_W || ny >= LEVEL_H || seen[ny][nx])
+                continue;
+            if (lv->cells[ny][nx] == CELL_WALL || lv->cells[ny][nx] == CELL_HOLE)
+                continue;
+            seen[ny][nx] = 1;
+            qx[tail] = (short)nx;
+            qy[tail] = (short)ny;
+            tail++;
+        }
+    }
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -110,6 +153,19 @@ int main(int argc, char **argv)
         CHECK(mask_hazards(&haz, &safe) == 2);
         CHECK(safe.cells[1][5] == CELL_WALL);
         CHECK(solve_at(&safe, 0).solved == 0);
+
+        /* Reachability arms both ways on the same fixture. The patrol above lies in the
+         * corridor the ball starts in, so it is reachable; move it into a pocket that
+         * nothing connects to the start and the answer has to flip. */
+        CHECK(hazards_reachable(&haz, &safe) == 1);
+        for (x = 15; x <= 19; x++)
+            haz.cells[5][x] = CELL_FLOOR;
+        haz.hazards[0].x0 = 15 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].x1 = 18 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].y0 = haz.hazards[0].y1 = 5 * CELL_PX + CELL_PX / 2.0f;
+        haz.hazards[0].length = 3 * CELL_PX;
+        CHECK(mask_hazards(&haz, &safe) == 4);
+        CHECK(hazards_reachable(&haz, &safe) == 0);
     }
 
     printf("  %-3s %-22s %5s %4s %5s %5s %6s %6s %6s  route\n", "#", "name", "holes", "tol",
@@ -147,6 +203,13 @@ int main(int argc, char **argv)
             if (!clear.solved)
                 printf("  level %d cannot be finished without crossing a hazard's path\n", i + 1);
             CHECK(clear.solved);
+
+            /* ...and it must not be the opposite failure either: a patrol the ball can
+             * never reach catches nothing, so the vault would ship advertising a hazard it
+             * does not really have. */
+            if (!hazards_reachable(&lv, &safe))
+                printf("  level %d has a patrol the ball can never reach\n", i + 1);
+            CHECK(hazards_reachable(&lv, &safe));
         }
     }
     return test_summary("solvable");

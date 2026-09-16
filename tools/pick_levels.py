@@ -169,12 +169,38 @@ def reaches_goal(rows: list[str], blocked: set[tuple[int, int]]) -> bool:
     return False
 
 
+def reachable_from_start(rows: list[str]) -> set[tuple[int, int]]:
+    """Every cell the ball could come to rest on, flood filled from 'S' over plain floor.
+    Holes stop the fill for the same reason they do in reaches_goal."""
+    start = next(((x, y) for y in range(LEVEL_H) for x in range(LEVEL_W) if rows[y][x] == "S"),
+                 None)
+    if start is None:
+        return set()
+    seen, stack = {start}, [start]
+    while stack:
+        x, y = stack.pop()
+        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if (nx, ny) in seen or not (0 <= nx < LEVEL_W and 0 <= ny < LEVEL_H):
+                continue
+            if rows[ny][nx] in "#O":
+                continue
+            seen.add((nx, ny))
+            stack.append((nx, ny))
+    return seen
+
+
 def place_hazard(rows: list[str], rng: random.Random) -> list[str] | None:
-    """Write one patrol into the map as 'a' and 'A'. Longest run first, but only a run the
-    ball can still get past: a patrol that seals the only corridor would fail the
-    hazard-clearance check in tests/test_solvable.c. Returns None if no run works."""
+    """Write one patrol into the map as 'a' and 'A'. Longest run first, but only a run that
+    is both got-past-able and got-to-able: a patrol sealing the only corridor fails the
+    hazard-clearance check in tests/test_solvable.c, and a patrol in a room the ball can
+    never enter is scenery -- it catches nothing, so the vault ships advertising a hazard it
+    does not have. Vault 31 was picked with exactly that flaw and was caught by the new
+    check, not by playing. Returns None if no run works."""
     runs = sorted(straight_runs(rows), key=lambda r: (r[2] - r[0]) + (r[3] - r[1]), reverse=True)
+    live = reachable_from_start(rows)
     for run in runs:
+        if not swept(run) & live:
+            continue
         if not reaches_goal(rows, swept(run)):
             continue
         x0, y0, x1, y1 = run
