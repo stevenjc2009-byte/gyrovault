@@ -4,7 +4,8 @@ CFLAGS  = -I../src -Wall -Wextra -Werror -O1
 LDLIBS  = -lm
 
 CORE    = ../src/level.c ../src/physics.c ../src/save.c ../src/version.c \
-          $(wildcard ../src/motion_map.c)
+          $(wildcard ../src/motion_map.c) $(wildcard ../src/sound_synth.c) \
+          $(wildcard ../src/timer.c)
 HEADERS = $(wildcard ../src/*.h) test.h
 TESTS   = $(sort $(wildcard test_*.c))
 SUITES  = $(TESTS:.c=)

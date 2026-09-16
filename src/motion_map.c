@@ -35,6 +35,8 @@
  *  - Top edge down (away from you): gravity gains +Y -> ball rolls UP the screen,
  *    and physics +y is DOWN the screen -> tilt_y = -(ay - ny)
  */
+#include <math.h>
+
 #include "motion.h"
 
 /* sin(25 deg): a 25 degree tilt moves one gravity component by this much -> tilt 1.0 */
@@ -47,4 +49,49 @@ void motion_map_accel(float ax, float ay, float az, float nx, float ny, float nz
     (void)nz;
     *tilt_x = (ax - nx) / TILT_FULL_SCALE_G;
     *tilt_y = -(ay - ny) / TILT_FULL_SCALE_G;
+}
+
+/* Averaging accumulator for motion_calibrate_begin/sample/end (see motion.h). Kept pure and
+ * free of sce* calls so it is host-testable like motion_map_accel above. */
+
+void motion_accum_init(MotionAccum *acc)
+{
+    acc->sum_x = 0.0f;
+    acc->sum_y = 0.0f;
+    acc->sum_z = 0.0f;
+    acc->count = 0;
+}
+
+void motion_accum_add(MotionAccum *acc, float x, float y, float z)
+{
+    acc->sum_x += x;
+    acc->sum_y += y;
+    acc->sum_z += z;
+    acc->count++;
+}
+
+int motion_accum_mean(const MotionAccum *acc, float *nx, float *ny, float *nz)
+{
+    float mx, my, mz, mag;
+
+    if (acc->count == 0)
+        return 0;
+
+    mx = acc->sum_x / acc->count;
+    my = acc->sum_y / acc->count;
+    mz = acc->sum_z / acc->count;
+
+    /* Sensor noise means the averaged vector's magnitude drifts off 1g; renormalise so the
+     * calibrated neutral is a unit gravity vector, same as a single raw sample would be. */
+    mag = sqrtf(mx * mx + my * my + mz * mz);
+    if (mag > 1e-6f) {
+        mx /= mag;
+        my /= mag;
+        mz /= mag;
+    }
+
+    *nx = mx;
+    *ny = my;
+    *nz = mz;
+    return acc->count;
 }

@@ -3,6 +3,7 @@
 #include "game.h"
 #include "motion.h"
 #include "render.h"
+#include "sound.h"
 
 #define MAX_DT 0.1f
 
@@ -13,6 +14,7 @@ int main(void)
         return 0;
     }
     motion_init();
+    sound_init(); /* failure is non-fatal: sound.h calls become silent no-ops */
     game_init();
 
     SceUInt64 prev = sceKernelGetProcessTimeWide();
@@ -28,6 +30,7 @@ int main(void)
     }
 
     game_shutdown();
+    sound_shutdown();
     render_shutdown();
     sceKernelExitProcess(0);
     return 0;
