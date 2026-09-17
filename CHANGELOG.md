@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.0.1] - 2026-09-16
+
+### Changed
+- **The game asks you to hold it level once per session, not once per vault.** The first vault you start after opening Gyrovault measures your neutral pose exactly as it always did; every vault after that reuses it and starts rolling straight away -- after *Next Level*, after picking a vault from Level Select, after quitting to the menu and starting again, and after a trip through *Check for Updates*. Close the game and open it again and it asks once more, because you will not be holding it the way you were when you put it down. *Recalibrate* in the pause menu still works whenever you want it and still counts as this session's calibration.
+
 ## [3.0.0] - 2026-09-16
 
 ### Added

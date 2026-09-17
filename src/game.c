@@ -11,6 +11,7 @@
 #include "physics.h"
 #include "render.h"
 #include "save.h"
+#include "session.h"
 #include "sound.h"
 #include "timer.h"
 #include "updater.h"
@@ -49,10 +50,6 @@ static unsigned  buttons_prev = 0, pressed = 0;
 
 /* Level to render_board_cache() outside the next render_begin/render_end, or -1 for none. */
 static int       pending_cache_index = -1;
-
-/* Session-only: once the player has done a flat ("place on a table") recalibration,
- * vault-start no longer auto-recalibrates. Not saved. */
-static int       calibrated_flat_this_session = 0;
 
 /* Per-vault elapsed play time; only advances during PLAY_RUN. */
 static float     play_time_s = 0.0f;
@@ -140,16 +137,20 @@ static void enter_level(int index)
         return;
     cur_level = index;
     physics_reset(&ball, &levels[index]);
-    play_state = PLAY_HOLD;
     state_timer = 0.0f;
     play_time_s = 0.0f;
     hazard_t = 0.0f;
     wall_sound_cd = 0.0f;
     save_failed = 0;
-    /* Once a flat recalibration has happened this session, vault-start no longer
-     * recalibrates, so there is nothing to average. */
-    if (!calibrated_flat_this_session)
+    /* The neutral pose is measured once per run of the game: the first vault you start
+     * asks you to hold still, and every vault after it reuses that pose and rolls
+     * straight away. Closing the game and opening it again asks once more. */
+    if (session_calib_needed()) {
         motion_calibrate_begin();
+        play_state = PLAY_HOLD;
+    } else {
+        play_state = PLAY_RUN;
+    }
     pending_cache_index = index; /* cached outside render_begin/render_end, see game_frame() */
     scene = SCENE_PLAY;
 }
@@ -320,8 +321,7 @@ static void scene_play(float dt)
     switch (play_state) {
     case PLAY_HOLD:
         state_timer += dt;
-        if (!calibrated_flat_this_session)
-            motion_calibrate_sample();
+        motion_calibrate_sample(); /* only ever reached when a calibration is needed */
         motion_read(&tx, &ty);
         draw_play_world(1.0f, NULL);
         render_dim(120);
@@ -329,8 +329,8 @@ static void scene_play(float dt)
         render_text_centered(SCREEN_W * 0.5f, 215, COL_TEXT, TEXT_BIG * 0.8f, "Hold your Vita level");
         render_tilt_gauge(SCREEN_W * 0.5f, 305, 38, tx, ty);
         if (state_timer >= HOLD_SECONDS) {
-            if (!calibrated_flat_this_session)
-                motion_calibrate_end();
+            motion_calibrate_end();
+            session_calib_mark_done(); /* no further vault this run asks */
             play_state = PLAY_RUN;
         }
         break;
@@ -346,7 +346,7 @@ static void scene_play(float dt)
         render_tilt_gauge(SCREEN_W * 0.5f, 320, 42, tx, ty);
         if (hit(SCE_CTRL_CROSS)) {
             motion_calibrate_end(); /* 0 samples safely keeps the previous neutral */
-            calibrated_flat_this_session = 1;
+            session_calib_mark_done();
             physics_reset(&ball, lv);
             play_time_s = 0.0f;
             hazard_t = 0.0f;
@@ -599,6 +599,7 @@ static void scene_updates(void)
 void game_init(void)
 {
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_DIGITAL);
+    session_calib_reset(); /* a fresh run of the game measures the neutral pose again */
     save_load(&save, SAVE_PATH); /* missing/corrupt -> defaults */
     for (int i = 0; i < LEVEL_COUNT; i++)
         level_ok[i] = level_load(i, &levels[i]) == 0;

@@ -7,7 +7,7 @@ LDLIBS  = -lm
 # pattern rule below stays a one-liner. Only test_solvable calls it.
 CORE    = ../src/level.c ../src/physics.c ../src/save.c ../src/version.c \
           $(wildcard ../src/motion_map.c) $(wildcard ../src/sound_synth.c) \
-          $(wildcard ../src/timer.c) solve_core.c
+          $(wildcard ../src/timer.c) $(wildcard ../src/session.c) solve_core.c
 HEADERS = $(wildcard ../src/*.h) test.h solve_core.h
 TESTS   = $(sort $(wildcard test_*.c))
 SUITES  = $(TESTS:.c=)
